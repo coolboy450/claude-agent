@@ -55,10 +55,10 @@
   }
 
   const AGENTS = {
-    ui:       { x: 84,  y: 92,  hair: '#3B2A3F', shirt: C.pop,    p: '#8B949E', q: '#8B949E', name: 'นักออกแบบ UI' },
-    frontend: { x: 236, y: 92,  hair: '#2B2118', shirt: C.accent, p: '#5E6570', q: '#5E6570', name: 'Frontend' },
-    graphic:  { x: 84,  y: 156, hair: '#6B3B1F', shirt: C.warn,   p: C.red,     q: '#B44B4B', name: 'นักออกแบบกราฟิก' },
-    reviewer: { x: 236, y: 156, hair: '#8B949E', shirt: C.text,   p: '#5E6570', q: '#5E6570', name: 'ผู้ตรวจคุณภาพ' },
+    ui:       { x: 84,  y: 92,  hair: '#3B2A3F', shirt: C.pop,    p: '#8B949E', q: '#8B949E', name: 'มินท์ · UI' },
+    frontend: { x: 236, y: 92,  hair: '#2B2118', shirt: C.accent, p: '#5E6570', q: '#5E6570', name: 'บิต · Frontend' },
+    graphic:  { x: 84,  y: 156, hair: '#6B3B1F', shirt: C.warn,   p: C.red,     q: '#B44B4B', name: 'ป๊อป · กราฟิก' },
+    reviewer: { x: 236, y: 156, hair: '#8B949E', shirt: C.text,   p: '#5E6570', q: '#5E6570', name: 'ครูแว่น · ตรวจ' },
   };
   const status = {};
   for (const k in AGENTS) { AGENTS[k].map = variant(k); status[k] = { state: 'idle', bubble: '' }; }
@@ -154,14 +154,38 @@
   }
   requestAnimationFrame(frame);
 
+  function paint(key) {
+    const a = AGENTS[key], s = status[key];
+    const text = a.sayText || s.bubble || '';
+    a.bubbleEl.textContent = text;
+    a.bubbleEl.classList.toggle('show', !!text);
+    a.bubbleEl.classList.toggle('waiting', !a.sayText && s.state === 'waiting');
+    a.plateEl.classList.toggle('working', s.state === 'working');
+  }
+
+  // click a character → callback(key)
+  let onPick = null;
+  canvas.addEventListener('click', (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * W, y = (e.clientY - r.top) / r.height * H;
+    let best = null, bd = 40;
+    for (const k in AGENTS) { const d = Math.hypot(AGENTS[k].x - x, AGENTS[k].y - 6 - y); if (d < bd) { bd = d; best = k; } }
+    if (best && onPick) onPick(best);
+  });
+
   window.Office = {
     set(key, state, bubble) {
-      const a = AGENTS[key]; if (!a) return;
+      if (!AGENTS[key]) return;
       status[key] = { state, bubble };
-      a.bubbleEl.textContent = bubble || '';
-      a.bubbleEl.classList.toggle('show', !!bubble);
-      a.bubbleEl.classList.toggle('waiting', state === 'waiting');
-      a.plateEl.classList.toggle('working', state === 'working');
+      paint(key);
     },
+    // chat line: shows over the speaker for a few seconds, then the work status returns
+    say(key, text) {
+      const a = AGENTS[key]; if (!a) return;
+      a.sayText = text; paint(key);
+      clearTimeout(a.sayTimer);
+      a.sayTimer = setTimeout(() => { a.sayText = ''; paint(key); }, 6000);
+    },
+    onPick(fn) { onPick = fn; },
   };
 })();

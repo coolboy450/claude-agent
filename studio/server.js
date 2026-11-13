@@ -25,12 +25,17 @@ const WINDOW_MS = 5 * 60 * 60 * 1000; // Pro usage window (~5h)
 const LOW_TOKENS = 200000;            // below this, every agent drops to Sonnet
 const MAX_REVIEW_FIXES = 2;           // reviewer bounce-backs before it goes to the owner anyway
 
+const PERSONAS = require('./personas');
+const CHAT_MODEL = process.env.STUDIO_CHAT_MODEL || 'haiku'; // chat is small talk: cheapest model
+const BANTER_EVERY_MS = 10 * 60 * 1000;
+
 const AGENTS = {
   ui:       { name: 'noob-ui-designer',      label: 'นักออกแบบ UI',       model: 'opus' },
   graphic:  { name: 'noob-graphic-designer', label: 'นักออกแบบกราฟิก',   model: 'opus' },
   frontend: { name: 'noob-frontend-dev',     label: 'นักพัฒนา Frontend', model: 'sonnet' },
   reviewer: { name: 'noob-brand-reviewer',   label: 'ผู้ตรวจคุณภาพ',      model: 'sonnet' },
 };
+const PUBLIC_PERSONAS = Object.fromEntries(Object.entries(PERSONAS).map(([k, p]) => [k, { name: p.name, emoji: p.emoji, role: p.role, color: p.color }]));
 
 // ---------- claude binary ----------
 function findClaude() {
@@ -50,6 +55,8 @@ let state = {
   usage: { windowStart: null, used: 0 },
   budget: { value: null, source: null }, // source: 'learned' | 'manual'
   jobs: [],
+  chat: [],      // { t, who, to, text }  who/to: 'owner' | agent key | 'all'
+  banter: false, // idle small talk between agents (uses a little quota)
 };
 try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
 for (const j of state.jobs) {
@@ -75,6 +82,22 @@ function pushJob(j) { save(); broadcast({ type: 'job', job: publicJob(j) }); }
 function log(j, who, text) {
   j.history.push({ t: Date.now(), who, text });
   broadcast({ type: 'log', jobId: j.id, who, text });
+}
+
+// ---------- team chat ----------
+function postChat(who, to, text) {
+  text = String(text || '').trim().slice(0, 600);
+  if (!text) return;
+  const msg = { t: Date.now(), who, to: to || 'all', text };
+  state.chat.push(msg); state.chat = state.chat.slice(-200);
+  save(); broadcast({ type: 'chat', msg });
+}
+function chatName(k) { return k === 'owner' ? 'เจ้าของ' : k === 'all' ? 'ทุกคน' : (PERSONAS[k] ? PERSONAS[k].name : k); }
+function recentChat(n = 12) {
+  return state.chat.slice(-n).map((m) => `[${chatName(m.who)} → ${chatName(m.to)}] ${m.text}`).join('\n') || '(ยังไม่มีข้อความ)';
+}
+function castSheet() {
+  return Object.entries(PERSONAS).map(([k, p]) => `- ${k}: ${p.name} ${p.emoji} ${p.role} — ${p.persona.join(' ')}`).join('\n');
 }
 
 // ---------- usage / budget ----------
@@ -106,7 +129,10 @@ function addUsage(u) {
   save();
   broadcast({ type: 'quota', quota: quota() });
 }
-function modelFor(key) { return quota().low ? 'sonnet' : AGENTS[key].model; }
+function modelFor(key) {
+  if (key === 'chat') return CHAT_MODEL;
+  return quota().low ? 'sonnet' : AGENTS[key].model;
+}
 
 // ---------- running an agent ----------
 class LimitError extends Error {}
@@ -179,14 +205,108 @@ function runAgent(job, key, prompt) {
 
 function extractJson(text) {
   const blocks = [...String(text).matchAll(/```json\s*([\s\S]*?)```/g)].map((m) => m[1]);
-  const cands = blocks.length ? blocks.reverse() : [String(text).slice(String(text).lastIndexOf('{'))];
-  for (const c of cands) { try { return JSON.parse(c.trim()); } catch {} }
+  const s = String(text);
+  const cands = [...blocks.reverse(), s.trim(), s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)];
+  // also try every '{' from the end, so trailing prose or several objects still parse
+  for (let i = s.lastIndexOf('{'); i >= 0; i = s.lastIndexOf('{', i - 1)) {
+    if (cands.length > 40) break;
+    cands.push(s.slice(i, s.lastIndexOf('}') + 1));
+  }
+  for (const c of cands) { if (!c) continue; try { const v = JSON.parse(c.trim()); if (v && typeof v === 'object') return v; } catch {} }
   return null;
 }
 
+// ---------- quick (chat) runs: cheap model, no tools ----------
+function runQuick(prompt) {
+  return new Promise((resolve, reject) => {
+    // lean run: own short system prompt, no tools, no MCP servers, no skills (~1k tokens instead of ~28k)
+    const args = ['-p', '--model', modelFor('chat'), '--output-format', 'json',
+      '--system-prompt', 'You write short in-character team chat lines for a pixel-office app. Reply with JSON only.',
+      '--tools', '', '--strict-mcp-config', '--disable-slash-commands'];
+    const child = spawn(CLAUDE.cmd, args, { cwd: DATA_DIR, shell: CLAUDE.shell, windowsHide: true, env: process.env });
+    let out = '', err = '';
+    child.stdout.on('data', (d) => { out += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { err += d.toString('utf8'); });
+    child.on('error', (e) => reject(e));
+    child.on('close', () => {
+      let r = null; try { r = JSON.parse(out.trim().split('\n').pop()); } catch {}
+      if (r) addUsage(r.usage);
+      const text = (r && r.result) || '';
+      if (LIMIT_RE.test(text + err)) return reject(new LimitError(short(text || err, 200)));
+      if (!r || r.is_error) return reject(new Error(short(text || err || 'แชทไม่ตอบ', 200)));
+      resolve(text);
+    });
+    child.stdin.write(prompt, 'utf8'); child.stdin.end();
+  });
+}
+
+function jobLine() {
+  const j = activeJob();
+  if (!j) return 'ตอนนี้ทีมว่าง ไม่มีงาน';
+  return `งานปัจจุบัน: "${j.brief}" (โปรเจกต์ ${path.basename(j.projectPath)}, ขั้น ${j.stage}, สถานะ ${j.status})`;
+}
+
+function chatPrompt(kind, target) {
+  const who = kind === 'banter'
+    ? 'ตอนนี้ทีมว่าง ให้ 2–3 คนคุยเล่นกันเองสั้นๆ 2–4 ข้อความ (เรื่องงาน แบรนด์ กาแฟ แมวนูบ มีม ฯลฯ) ห้ามพูดถึงเจ้าของในแง่ลบ'
+    : target === 'all'
+      ? 'เจ้าของเพิ่งพิมพ์ถึงทุกคน ให้ 1–3 คนที่เกี่ยวข้องที่สุดตอบ'
+      : `เจ้าของเพิ่งพิมพ์ถึง ${chatName(target)} ให้ ${chatName(target)} ตอบเป็นหลัก และอาจมีอีก 1 คนแซวหรือเสริมสั้นๆ ถ้าเข้ากับบทสนทนา`;
+  return `คุณคือผู้เขียนบทสนทนาในห้องแชทของทีม noob_dev Design (ออฟฟิศพิกเซล)
+ตัวละคร (key: ชื่อ — นิสัย):
+${castSheet()}
+
+${jobLine()}
+แชทล่าสุด:
+${recentChat(16)}
+
+${who}
+กติกา:
+- ภาษาไทย แต่ละข้อความ 1–2 ประโยค พูดตามนิสัยของตัวละคร เป็นกันเอง
+- ตัวละครคุยกันเองได้ (ตอบกัน แซวกัน) แต่ห้ามแต่งว่าทำงานเสร็จแล้วถ้ายังไม่ได้ทำจริง
+- ถ้าเจ้าของสั่งงานหรือขอแก้ ให้รับทราบว่าจะเอาไปใช้ในขั้นถัดไปของงาน หรือถ้ายังไม่มีงาน ให้แนะนำให้กด "สั่งงาน"
+- ตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น:
+{"replies":[{"who":"ui|frontend|graphic|reviewer","to":"owner|all|ui|frontend|graphic|reviewer","text":"..."}]}`;
+}
+
+let chatBusy = false, chatAgain = null;
+async function runChat(kind, target) {
+  if (chatBusy) { chatAgain = chatAgain || { kind, target }; return; }
+  chatBusy = true;
+  const speakers = target && target !== 'all' ? [target] : Object.keys(PERSONAS);
+  broadcast({ type: 'typing', who: kind === 'banter' ? [] : speakers });
+  try {
+    const text = await runQuick(chatPrompt(kind, target));
+    const j = extractJson(text);
+    const replies = (j && Array.isArray(j.replies)) ? j.replies.slice(0, 4) : [];
+    for (const r of replies) {
+      if (!PERSONAS[r.who]) continue;
+      broadcast({ type: 'typing', who: [r.who] });
+      await new Promise((ok) => setTimeout(ok, 700 + Math.min(2000, String(r.text).length * 25)));
+      postChat(r.who, r.to || 'owner', r.text);
+    }
+    if (!replies.length && kind !== 'banter') postChat('reviewer', 'owner', 'ขอโทษนะ ครูแว่นหลุดไปแป๊บ ลองพิมพ์ใหม่อีกทีได้ไหม');
+  } catch (e) {
+    if (kind !== 'banter') postChat('reviewer', 'owner', e instanceof LimitError ? 'โควตารอบนี้หมดแล้ว ทุกคนขอพักแป๊บนะ 😴' : 'แชทขัดข้อง: ' + e.message);
+  } finally {
+    broadcast({ type: 'typing', who: [] });
+    chatBusy = false;
+    if (chatAgain) { const n = chatAgain; chatAgain = null; runChat(n.kind, n.target); }
+  }
+}
+
+setInterval(() => {
+  if (!state.banter || busy || chatBusy || clients.size === 0 || quota().low) return;
+  const last = state.chat.length ? state.chat[state.chat.length - 1].t : 0;
+  if (Date.now() - last < BANTER_EVERY_MS) return;
+  runChat('banter', 'all');
+}, 60 * 1000);
+
 // ---------- prompts ----------
 const COMMON = (job) =>
-  `งานจากเจ้าของ: ${job.brief}\nโปรเจกต์: ${job.projectPath}\nโฟลเดอร์งานนี้ของสตูดิโอ: ${job.workDir}\nคู่มือแบรนด์: ${path.join(BRAND_DIR, 'brand-guide.md')}\nตอบเป็นภาษาไทย สั้น กระชับ\n`;
+  `งานจากเจ้าของ: ${job.brief}\nโปรเจกต์: ${job.projectPath}\nโฟลเดอร์งานนี้ของสตูดิโอ: ${job.workDir}\nคู่มือแบรนด์: ${path.join(BRAND_DIR, 'brand-guide.md')}\nตอบเป็นภาษาไทย สั้น กระชับ\n` +
+  `\nแชทล่าสุดในห้องทีม (ถ้าเจ้าของสั่งหรือขอเพิ่มอะไรไว้ ให้ทำตามด้วย):\n${recentChat(12)}\n`;
+const SAY = (to) => `"say":"ข้อความสั้น 1 ประโยคตามนิสัยของคุณ ถึง${to}"`;
 
 function draftPrompt(job) {
   const what = job.kind === 'graphic' ? 'กราฟิก (แสดงแต่ละแบบในขนาดจริงตามคู่มือหมวด 7)' : 'หน้าเว็บ/embed';
@@ -196,7 +316,7 @@ function draftPrompt(job) {
 ห้ามแก้ไฟล์อื่นในโปรเจกต์
 จบคำตอบด้วยบล็อกนี้ (ห้ามมีข้อความหลังบล็อก):
 \`\`\`json
-{"options":[{"id":"A","title":"ชื่อสั้น","summary":"1–2 บรรทัด"}]}
+{"options":[{"id":"A","title":"ชื่อสั้น","summary":"1–2 บรรทัด"}],${SAY('เจ้าของ ชวนให้มาเลือกแบบ')}}
 \`\`\``;
 }
 
@@ -207,13 +327,15 @@ function buildPrompt(job, fixNote) {
     return `${COMMON(job)}
 เจ้าของเลือก "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}
 ทำไฟล์จริงทุกขนาดที่ต้องใช้ (SVG และ PNG ถ้าทำได้) ไว้ใน ${path.join(job.workDir, 'final')}
-สรุปท้ายคำตอบ: รายการไฟล์ + ใช้ที่ไหน${fix}`;
+สรุปท้ายคำตอบ: รายการไฟล์ + ใช้ที่ไหน${fix}
+แล้วปิดท้ายด้วยบล็อก \`\`\`json {${SAY('ครูแว่น (ผู้ตรวจ) ตอนส่งงานให้ตรวจ')}} \`\`\``;
   }
   return `${COMMON(job)}
 เจ้าของเลือก "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}
 นำแบบนี้ไปเขียนเป็นโค้ดจริงในโปรเจกต์ ${job.projectPath} (ถ้าเป็นโปรเจกต์ใหม่หรือไม่มีหน้าที่เกี่ยวข้อง ให้สร้างไฟล์ใหม่ในโปรเจกต์)
 ห้าม commit/push
-สรุปท้ายคำตอบ: รายการไฟล์ที่สร้าง/แก้ + วิธีเปิดดู${fix}`;
+สรุปท้ายคำตอบ: รายการไฟล์ที่สร้าง/แก้ + วิธีเปิดดู${fix}
+แล้วปิดท้ายด้วยบล็อก \`\`\`json {${SAY('ครูแว่น (ผู้ตรวจ) ตอนส่งงานให้ตรวจ')}} \`\`\``;
 }
 
 function reviewPrompt(job, makerSummary) {
@@ -225,7 +347,7 @@ ${makerSummary}
 ห้ามแก้ไฟล์
 จบคำตอบด้วยบล็อกนี้ (ห้ามมีข้อความหลังบล็อก):
 \`\`\`json
-{"verdict":"pass หรือ fail","issues":["ไฟล์:บรรทัด → ผิดอะไร → ควรเป็นอะไร"]}
+{"verdict":"pass หรือ fail","issues":["ไฟล์:บรรทัด → ผิดอะไร → ควรเป็นอะไร"],${SAY('คนทำงาน (ชม หรือบอกให้แก้แบบใจดี)')}}
 \`\`\``;
 }
 
@@ -262,6 +384,7 @@ function runDrafts(job) {
     const j = extractJson(text);
     job.options = (j && Array.isArray(j.options) && j.options.length) ? j.options
       : [{ id: 'A', title: 'แบบ A', summary: '' }, { id: 'B', title: 'แบบ B', summary: '' }];
+    if (j && j.say) postChat(designerKey(job), 'owner', j.say);
     job.stage = 'choose'; job.status = 'waiting_choice';
     setAgent(designerKey(job), 'waiting', 'รอเจ้าของเลือกแบบ ✋');
   });
@@ -273,9 +396,12 @@ function runBuildAndReview(job, fixNote) {
     for (let round = 0; ; round++) {
       job.stage = 'build';
       job.makerSummary = await runAgent(job, makerKey(job), buildPrompt(job, note));
+      const ms = extractJson(job.makerSummary);
+      if (ms && ms.say) postChat(makerKey(job), 'reviewer', ms.say);
       job.stage = 'review';
       const rtext = await runAgent(job, 'reviewer', reviewPrompt(job, job.makerSummary));
       const r = extractJson(rtext) || { verdict: 'fail', issues: ['ผู้ตรวจไม่ได้ส่งผลในรูปแบบที่อ่านได้'] };
+      if (r.say) postChat('reviewer', makerKey(job), r.say);
       job.review = { verdict: String(r.verdict).includes('pass') ? 'pass' : 'fail', issues: r.issues || [], text: rtext };
       if (job.review.verdict === 'pass') { setAgent('reviewer', 'idle', 'ผ่าน ✅'); break; }
       setAgent('reviewer', 'idle', `ตีกลับ ❌ ${job.review.issues.length} ข้อ`);
@@ -333,7 +459,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), labels: AGENTS })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter })}\n\n`);
     clients.add(res); req.on('close', () => clients.delete(res));
     return;
   }
@@ -375,6 +501,7 @@ const server = http.createServer(async (req, res) => {
       job.chosen = String(b.option || '');
       if (!job.options.some((o) => o.id === job.chosen)) return json(res, 400, { error: 'ไม่มีแบบนี้' });
       log(job, 'owner', `เลือกแบบ ${job.chosen}${b.note ? ' — ' + b.note : ''}`);
+      postChat('owner', 'all', `เลือกแบบ ${job.chosen} นะ${b.note ? ' — ' + b.note : ''}`);
       setAgent(designerKey(job), 'idle', '');
       runBuildAndReview(job, b.note ? `ความเห็นเพิ่มเติมจากเจ้าของ: ${b.note}` : null);
     } else if (m[2] === 'approve') {
@@ -382,10 +509,12 @@ const server = http.createServer(async (req, res) => {
       setAgent('reviewer', 'idle', '');
       if (b.approved) {
         job.status = 'done'; job.stage = 'done'; log(job, 'owner', 'อนุมัติแล้ว 🎉'); pushJob(job);
+        postChat('owner', 'all', 'อนุมัติแล้ว เก่งมากทุกคน 🎉');
         for (const k of Object.keys(AGENTS)) setAgent(k, 'idle', '🎉');
       } else {
         const note = String(b.note || '').trim() || 'เจ้าของยังไม่พอใจ ลองปรับให้ดีขึ้น';
         log(job, 'owner', `ขอแก้: ${note}`);
+        postChat('owner', makerKey(job), `ขอแก้: ${note}`);
         runBuildAndReview(job, `เจ้าของขอแก้: ${note}`);
       }
     } else if (m[2] === 'resume') {
@@ -402,8 +531,19 @@ const server = http.createServer(async (req, res) => {
   const f = p.match(/^\/api\/jobs\/([\w-]+)\/files$/);
   if (f) { const job = findJob(f[1]); return json(res, job ? 200 : 404, { files: job ? finalFiles(job) : [] }); }
 
+  if (p === '/api/chat' && req.method === 'POST') {
+    const b = await readBody(req);
+    const to = b.to === 'all' || PERSONAS[b.to] ? b.to : 'all';
+    const text = String(b.text || '').trim();
+    if (!text) return json(res, 400, { error: 'พิมพ์ข้อความก่อน' });
+    postChat('owner', to, text);
+    runChat('reply', to);
+    return json(res, 200, { ok: true });
+  }
+
   if (p === '/api/settings' && req.method === 'POST') {
     const b = await readBody(req);
+    if (typeof b.banter === 'boolean') { state.banter = b.banter; broadcast({ type: 'banter', on: state.banter }); }
     if (b.budget === null || b.budget === '') state.budget = { value: null, source: null };
     else if (Number(b.budget) > 0) state.budget = { value: Math.round(Number(b.budget)), source: 'manual' };
     if (b.resetUsage) state.usage = { windowStart: Date.now(), used: 0 };

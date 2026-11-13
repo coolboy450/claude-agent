@@ -155,6 +155,48 @@
     while ($('log').children.length > 200) $('log').lastChild.remove();
   }
 
+  // ---------- team chat ----------
+  let personas = {};
+  function setPersonas(p) {
+    personas = p || {};
+    const sel = $('chat-to'), cur = sel.value;
+    sel.innerHTML = '<option value="all">ทุกคน</option>';
+    for (const k in personas) {
+      sel.add(new Option(`${personas[k].emoji} ${personas[k].name}`, k));
+      NAMES[k] = `${personas[k].name}`;
+    }
+    sel.value = cur && sel.querySelector(`option[value="${cur}"]`) ? cur : 'all';
+  }
+  const pname = (k) => k === 'owner' ? 'คุณ' : k === 'all' ? 'ทุกคน' : (personas[k] ? personas[k].name : k);
+  function addChat(m, animate) {
+    const li = document.createElement('li');
+    const p = personas[m.who];
+    li.className = 'msg ' + (m.who === 'owner' ? 'owner' : '');
+    if (p) li.style.setProperty('--c', p.color);
+    const av = document.createElement('span'); av.className = 'av'; av.textContent = p ? p.emoji : '🙂'; av.setAttribute('aria-hidden', 'true');
+    const body = document.createElement('div');
+    const who = document.createElement('div'); who.className = 'who';
+    const b = document.createElement('b'); b.textContent = pname(m.who);
+    who.append(b, document.createTextNode(m.to && m.to !== 'all' && m.to !== 'owner' ? ` → ${pname(m.to)}` : m.who === 'owner' && m.to === 'all' ? ' → ทุกคน' : ''));
+    const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = m.text;
+    body.append(who, txt); li.append(av, body);
+    const box = $('chat');
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.append(li);
+    while (box.children.length > 150) box.firstChild.remove();
+    if (atBottom || m.who === 'owner') box.scrollTop = box.scrollHeight;
+    if (animate && personas[m.who]) Office.say(m.who, m.text);
+  }
+  $('chat-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const text = $('chat-text').value.trim(); if (!text) return;
+    $('chat-text').value = '';
+    try { await api('/api/chat', { to: $('chat-to').value, text }); }
+    catch (err) { $('chat-text').value = text; alert(err.message); }
+  };
+  Office.onPick((k) => { $('chat-to').value = k; $('chat-text').focus(); });
+  $('banter').onchange = () => api('/api/settings', { banter: $('banter').checked }).catch((e) => alert(e.message));
+
   // ---------- live events ----------
   function connect() {
     const es = new EventSource('/api/events');
@@ -163,6 +205,10 @@
     es.onmessage = (m) => {
       const e = JSON.parse(m.data);
       if (e.type === 'hello') {
+        setPersonas(e.personas);
+        $('banter').checked = !!e.banter;
+        $('chat').innerHTML = ''; (e.chat || []).forEach((m) => addChat(m, false));
+        $('chat').scrollTop = $('chat').scrollHeight;
         for (const k in e.agents) Office.set(k, e.agents[k].state, e.agents[k].bubble);
         renderQuota(e.quota);
         $('log').innerHTML = '';
@@ -172,6 +218,9 @@
       if (e.type === 'quota') renderQuota(e.quota);
       if (e.type === 'job') setJob(e.job);
       if (e.type === 'log' && (!job || e.jobId === job.id)) addLog(e.who, e.text);
+      if (e.type === 'chat') addChat(e.msg, true);
+      if (e.type === 'banter') $('banter').checked = e.on;
+      if (e.type === 'typing') $('typing').textContent = e.who.length ? e.who.map(pname).join(', ') + ' กำลังพิมพ์…' : '';
     };
   }
 
