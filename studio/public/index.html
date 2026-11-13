@@ -30,10 +30,29 @@
         <li data-s="review">ตรวจ</li>
         <li data-s="approve">✋ อนุมัติ</li>
       </ol>
-      <section class="card log-card" aria-labelledby="log-title">
-        <h2 id="log-title" class="label">&gt; log</h2>
-        <ul class="log" id="log"></ul>
+      <section class="card chat-card" aria-labelledby="chat-title">
+        <div class="row-between">
+          <h2 id="chat-title" class="label">&gt; ห้องแชททีม</h2>
+          <label class="toggle small"><input type="checkbox" id="banter"> คุยเล่นตอนว่าง</label>
+        </div>
+        <ul class="chat" id="chat" aria-live="polite"></ul>
+        <p class="typing small" id="typing" aria-live="polite"></p>
+        <form class="chat-form" id="chat-form">
+          <label class="sr-only" for="chat-to">ส่งถึง</label>
+          <select id="chat-to">
+            <option value="all">ทุกคน</option>
+          </select>
+          <label class="sr-only" for="chat-text">ข้อความ</label>
+          <input id="chat-text" type="text" autocomplete="off" maxlength="600" placeholder="พิมพ์คุยกับทีม… (คลิกตัวละครเพื่อคุยเฉพาะคน)">
+          <button class="btn btn-primary" type="submit">ส่ง</button>
+        </form>
+        <p class="muted small">ข้อความของคุณจะถูกส่งให้ทีมใช้ในขั้นถัดไปของงานด้วย · แชทใช้ Haiku เพื่อประหยัดโควตา</p>
       </section>
+
+      <details class="card log-card">
+        <summary class="label" id="log-title">&gt; log การทำงาน</summary>
+        <ul class="log" id="log"></ul>
+      </details>
     </section>
 
     <aside class="panel">

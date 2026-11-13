@@ -118,7 +118,31 @@ a.link { display: inline-flex; align-items: center; }
 details summary { cursor: pointer; font-size: 14px; color: var(--muted); min-height: 44px; display: flex; align-items: center; }
 pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--muted); max-height: 240px; overflow: auto; }
 
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* chat */
+.chat-card { margin-bottom: 16px; }
+.chat { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px; max-height: 360px; min-height: 120px; overflow-y: auto; padding-right: 4px; }
+.chat:empty::before { content: "ยังไม่มีข้อความ ลองทักทีมดูสิ"; color: var(--muted); font-size: 14px; }
+.msg { display: grid; grid-template-columns: 32px 1fr; gap: 8px; align-items: start; }
+.msg .av { width: 32px; height: 32px; border-radius: var(--r-pill); display: grid; place-items: center; font-size: 16px; background: var(--bg); border: 2px solid var(--c, var(--border)); }
+.msg .who { font-size: 12px; font-family: var(--mono); color: var(--muted); }
+.msg .who b { color: var(--c, var(--text)); font-weight: 600; }
+.msg .txt { background: var(--bg); border: 1px solid var(--border); border-radius: 4px var(--r-md) var(--r-md) var(--r-md); padding: 8px 12px; display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.msg.owner { grid-template-columns: 1fr; justify-items: end; }
+.msg.owner .av { display: none; }
+.msg.owner .who { text-align: right; }
+.msg.owner .txt { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); border-radius: var(--r-md) 4px var(--r-md) var(--r-md); }
+.typing { color: var(--muted); min-height: 24px; font-family: var(--mono); font-size: 12px; margin-top: 8px; }
+.chat-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 8px 0; }
+.chat-form select { grid-column: 1 / -1; }
+@media (min-width: 768px) { .chat-form { grid-template-columns: 140px 1fr auto; } .chat-form select { grid-column: auto; } }
+.toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+#canvas { cursor: pointer; }
+
 .log-card { padding: 16px 24px; }
+.log-card summary { cursor: pointer; margin: 0; min-height: 44px; display: flex; align-items: center; }
 .log { list-style: none; padding: 0; font-family: var(--mono); font-size: 12px; line-height: 1.7; max-height: 220px; overflow: auto; display: flex; flex-direction: column-reverse; }
 .log li { color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border); }
 .log li b { color: var(--text); font-weight: 600; }
