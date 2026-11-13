@@ -13,7 +13,9 @@ const crypto = require('crypto');
 
 // ---------- config ----------
 const PORT = Number(process.env.STUDIO_PORT || 4321);
-const HOST = '127.0.0.1'; // local only
+// 127.0.0.1 = this machine only. On a server set STUDIO_HOST=0.0.0.0 and firewall the port
+// so only a private network (e.g. Tailscale) can reach it — see deploy/install.sh.
+const HOST = process.env.STUDIO_HOST || '127.0.0.1';
 const PROJECTS_ROOT = process.env.STUDIO_PROJECTS_ROOT || 'E:\\';
 const HOME_CLAUDE = path.join(os.homedir(), '.claude');
 const BRAND_DIR = path.join(HOME_CLAUDE, 'noob_dev');
@@ -539,7 +541,7 @@ const server = http.createServer(async (req, res) => {
   // Same-origin guard for state-changing requests (blocks other websites from driving the studio)
   if (req.method === 'POST') {
     const origin = req.headers.origin;
-    if (origin && origin !== `http://${HOST}:${PORT}` && origin !== `http://localhost:${PORT}`) return json(res, 403, { error: 'forbidden' });
+    if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) return json(res, 403, { error: 'forbidden' });
   }
 
   if (p === '/api/events') {

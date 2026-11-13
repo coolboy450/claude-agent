@@ -1,0 +1,17 @@
+[Unit]
+Description=noob_dev Studio
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=noob
+WorkingDirectory=/home/noob/claude-agent/studio
+Environment=STUDIO_HOST=0.0.0.0
+Environment=STUDIO_PORT=4321
+Environment=STUDIO_PROJECTS_ROOT=/home/noob/projects
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
