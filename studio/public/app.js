@@ -195,7 +195,32 @@
     catch (err) { $('chat-text').value = text; alert(err.message); }
   };
   Office.onPick((k) => { $('chat-to').value = k; $('chat-text').focus(); });
-  $('banter').onchange = () => api('/api/settings', { banter: $('banter').checked }).catch((e) => alert(e.message));
+  function setBanter(on, every) {
+    const v = on ? String(every) : '0';
+    const sel = $('banter-every');
+    if (![...sel.options].some((o) => o.value === v)) sel.add(new Option(`ทุก ${Math.round(every / 60000)} นาที`, v));
+    sel.value = v;
+  }
+  $('banter-every').onchange = () => {
+    const v = Number($('banter-every').value);
+    api('/api/settings', v ? { banter: true, banterEvery: v } : { banter: false }).catch((e) => alert(e.message));
+  };
+
+  // ---------- moods ----------
+  const MOOD_EMOJI = { 'ปกติ': '', 'ดีใจ': '😊', 'ตื่นเต้น': '✨', 'งอน': '💢', 'น้อยใจ': '🥺', 'เหนื่อย': '😮‍💨', 'หิว': '🍜', 'ง่วง': '💤' };
+  function renderMoods(moods) {
+    const ul = $('moods'); ul.innerHTML = '';
+    for (const k in moods) {
+      const m = moods[k], p = personas[k]; if (!p) continue;
+      const label = m.mood === 'ปกติ' ? 'ปกติ' : `${m.mood}${m.toward ? ' ' + pname(m.toward) : ''}${m.reason ? ' — ' + m.reason : ''}`;
+      Office.mood(k, m.mood, MOOD_EMOJI[m.mood], `${p.name}: ${label}`);
+      const li = document.createElement('li'); li.style.setProperty('--c', p.color);
+      if (m.mood === 'งอน' || m.mood === 'น้อยใจ') li.className = 'hot';
+      const b = document.createElement('b'); b.textContent = p.name;
+      li.append(b, document.createTextNode(` ${MOOD_EMOJI[m.mood] || '🙂'} ${label}`));
+      ul.append(li);
+    }
+  }
 
   // ---------- live events ----------
   function connect() {
@@ -206,7 +231,8 @@
       const e = JSON.parse(m.data);
       if (e.type === 'hello') {
         setPersonas(e.personas);
-        $('banter').checked = !!e.banter;
+        setBanter(e.banter, e.banterEvery);
+        renderMoods(e.moods || {});
         $('chat').innerHTML = ''; (e.chat || []).forEach((m) => addChat(m, false));
         $('chat').scrollTop = $('chat').scrollHeight;
         for (const k in e.agents) Office.set(k, e.agents[k].state, e.agents[k].bubble);
@@ -219,7 +245,8 @@
       if (e.type === 'job') setJob(e.job);
       if (e.type === 'log' && (!job || e.jobId === job.id)) addLog(e.who, e.text);
       if (e.type === 'chat') addChat(e.msg, true);
-      if (e.type === 'banter') $('banter').checked = e.on;
+      if (e.type === 'banter') setBanter(e.on, e.every);
+      if (e.type === 'moods') renderMoods(e.moods);
       if (e.type === 'typing') $('typing').textContent = e.who.length ? e.who.map(pname).join(', ') + ' กำลังพิมพ์…' : '';
     };
   }

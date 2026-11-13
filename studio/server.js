@@ -27,7 +27,8 @@ const MAX_REVIEW_FIXES = 2;           // reviewer bounce-backs before it goes to
 
 const PERSONAS = require('./personas');
 const CHAT_MODEL = process.env.STUDIO_CHAT_MODEL || 'haiku'; // chat is small talk: cheapest model
-const BANTER_EVERY_MS = 10 * 60 * 1000;
+const BANTER_DEFAULT_MS = 3 * 60 * 1000; // team chats on its own every 3 min by default
+const MOODS = ['ปกติ', 'ดีใจ', 'ตื่นเต้น', 'งอน', 'น้อยใจ', 'เหนื่อย', 'หิว', 'ง่วง'];
 
 const AGENTS = {
   ui:       { name: 'noob-ui-designer',      label: 'นักออกแบบ UI',       model: 'opus' },
@@ -35,7 +36,7 @@ const AGENTS = {
   frontend: { name: 'noob-frontend-dev',     label: 'นักพัฒนา Frontend', model: 'sonnet' },
   reviewer: { name: 'noob-brand-reviewer',   label: 'ผู้ตรวจคุณภาพ',      model: 'sonnet' },
 };
-const PUBLIC_PERSONAS = Object.fromEntries(Object.entries(PERSONAS).map(([k, p]) => [k, { name: p.name, emoji: p.emoji, role: p.role, color: p.color }]));
+const PUBLIC_PERSONAS = Object.fromEntries(Object.entries(PERSONAS).map(([k, p]) => [k, { name: p.name, emoji: p.emoji, role: p.role, color: p.color, gender: p.gender }]));
 
 // ---------- claude binary ----------
 function findClaude() {
@@ -56,9 +57,17 @@ let state = {
   budget: { value: null, source: null }, // source: 'learned' | 'manual'
   jobs: [],
   chat: [],      // { t, who, to, text }  who/to: 'owner' | agent key | 'all'
-  banter: false, // idle small talk between agents (uses a little quota)
+  banter: true,  // agents chat on their own (uses a little quota)
+  banterEvery: BANTER_DEFAULT_MS,
+  moods: {},     // key -> { mood, toward, reason, since }
 };
-try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
+try {
+  const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  if (saved.banterEvery == null) { delete saved.banter; } // older state: switch auto-chat on once
+  state = { ...state, ...saved };
+} catch {}
+for (const k of Object.keys(PERSONAS)) if (!state.moods[k]) state.moods[k] = { mood: 'ปกติ', toward: null, reason: '', since: Date.now() };
+let lastBanterAt = 0;
 for (const j of state.jobs) {
   if (j.status === 'running') { j.status = 'failed'; j.error = 'เซิร์ฟเวอร์ถูกปิดระหว่างทำงาน'; }
 }
@@ -97,7 +106,27 @@ function recentChat(n = 12) {
   return state.chat.slice(-n).map((m) => `[${chatName(m.who)} → ${chatName(m.to)}] ${m.text}`).join('\n') || '(ยังไม่มีข้อความ)';
 }
 function castSheet() {
-  return Object.entries(PERSONAS).map(([k, p]) => `- ${k}: ${p.name} ${p.emoji} ${p.role} — ${p.persona.join(' ')}`).join('\n');
+  return Object.entries(PERSONAS).map(([k, p]) =>
+    `- ${k}: ${p.name} ${p.emoji} ${p.role} · เพศ ${p.gender}\n  วิธีพูด: ${p.speech}\n  นิสัย: ${p.persona.join(' ')}`).join('\n');
+}
+function moodSheet() {
+  return Object.entries(state.moods).map(([k, m]) => {
+    const mins = Math.round((Date.now() - m.since) / 60000);
+    return `- ${chatName(k)}: ${m.mood}${m.toward ? ' ใส่ ' + chatName(m.toward) : ''}${m.reason ? ' (เพราะ ' + m.reason + ')' : ''} — เป็นมา ${mins} นาที`;
+  }).join('\n');
+}
+function applyMoods(list) {
+  if (!Array.isArray(list)) return;
+  let changed = false;
+  for (const u of list.slice(0, 4)) {
+    if (!PERSONAS[u.who] || !MOODS.includes(u.mood)) continue;
+    const toward = PERSONAS[u.toward] && u.toward !== u.who ? u.toward : null;
+    const cur = state.moods[u.who];
+    if (cur && cur.mood === u.mood && cur.toward === toward) continue;
+    state.moods[u.who] = { mood: u.mood, toward, reason: short(u.reason || '', 80), since: Date.now() };
+    changed = true;
+  }
+  if (changed) { save(); broadcast({ type: 'moods', moods: state.moods }); }
 }
 
 // ---------- usage / budget ----------
@@ -246,9 +275,34 @@ function jobLine() {
   return `งานปัจจุบัน: "${j.brief}" (โปรเจกต์ ${path.basename(j.projectPath)}, ขั้น ${j.stage}, สถานะ ${j.status})`;
 }
 
+// The server steers the drama so it reliably happens: who starts sulking, and when they make up.
+function plotHint() {
+  const keys = Object.keys(PERSONAS);
+  const sulking = keys.filter((k) => ['งอน', 'น้อยใจ'].includes(state.moods[k].mood));
+  if (sulking.length) {
+    const k = sulking[0], m = state.moods[k], mins = (Date.now() - m.since) / 60000;
+    if (mins >= 6 && Math.random() < 0.5) {
+      return `\nบทรอบนี้: ให้${m.toward ? chatName(m.toward) + 'หรือคนอื่น' : 'ใครสักคน'}ง้อ${chatName(k)}จนหายงอน แล้วอัปเดตอารมณ์ ${k} เป็น ดีใจ (toward null)`;
+    }
+    return `\nบทรอบนี้: ${chatName(k)}ยัง${m.mood}${m.toward ? 'ใส่' + chatName(m.toward) : ''}อยู่ คนอื่นสังเกตหรือแซว แต่ยังไม่หายงอน (ไม่ต้องอัปเดตอารมณ์ ${k})`;
+  }
+  if (Math.random() < 0.4) {
+    const a = keys[Math.floor(Math.random() * keys.length)];
+    const others = keys.filter((x) => x !== a);
+    const b = others[Math.floor(Math.random() * others.length)];
+    const mood = Math.random() < 0.6 ? 'งอน' : 'น้อยใจ';
+    return `\nบทรอบนี้: เกิดเรื่องเล็กๆ ที่ทำให้${chatName(a)}${mood}${chatName(b)} (คิดเหตุผลขำๆ ให้เข้ากับนิสัยทั้งสองคน) แล้วอัปเดตอารมณ์ ${a} เป็น ${mood} toward ${b}`;
+  }
+  return '';
+}
+
 function chatPrompt(kind, target) {
   const who = kind === 'banter'
-    ? 'ตอนนี้ทีมว่าง ให้ 2–3 คนคุยเล่นกันเองสั้นๆ 2–4 ข้อความ (เรื่องงาน แบรนด์ กาแฟ แมวนูบ มีม ฯลฯ) ห้ามพูดถึงเจ้าของในแง่ลบ'
+    ? `ไม่มีใครทักมา ให้ทีมคุยกันเองต่อจากแชทล่าสุด 2–4 ข้อความ (2–3 คน) ${activeJob() ? 'เรื่องงานที่ทำอยู่ บ่น แซว ให้กำลังใจกัน' : 'เรื่องชีวิตในออฟฟิศ กาแฟ ชานม แมวนูบ มีม ดีไซน์ ฯลฯ'}
+ดำเนินเรื่องต่อเนื่องเหมือนละครออฟฟิศสั้นๆ:
+- ถ้ามีคนงอน/น้อยใจอยู่ คนอื่นควรสังเกต แซว หรือง้อ และคนที่งอนตอบตามนิสัย (งอนต่อ หรือใจอ่อน)
+- งอนนานพอแล้ว (ประมาณ 6–15 นาที) ให้คืนดีกันอย่างน่ารัก แล้วเปลี่ยนอารมณ์เป็น ดีใจ หรือ ปกติ
+- อย่าให้งอนพร้อมกันเกิน 1 คน${plotHint()}`
     : target === 'all'
       ? 'เจ้าของเพิ่งพิมพ์ถึงทุกคน ให้ 1–3 คนที่เกี่ยวข้องที่สุดตอบ'
       : `เจ้าของเพิ่งพิมพ์ถึง ${chatName(target)} ให้ ${chatName(target)} ตอบเป็นหลัก และอาจมีอีก 1 คนแซวหรือเสริมสั้นๆ ถ้าเข้ากับบทสนทนา`;
@@ -257,16 +311,21 @@ function chatPrompt(kind, target) {
 ${castSheet()}
 
 ${jobLine()}
+อารมณ์ตอนนี้:
+${moodSheet()}
+
 แชทล่าสุด:
 ${recentChat(16)}
 
 ${who}
 กติกา:
-- ภาษาไทย แต่ละข้อความ 1–2 ประโยค พูดตามนิสัยของตัวละคร เป็นกันเอง
-- ตัวละครคุยกันเองได้ (ตอบกัน แซวกัน) แต่ห้ามแต่งว่าทำงานเสร็จแล้วถ้ายังไม่ได้ทำจริง
+- ภาษาไทย แต่ละข้อความ 1–2 ประโยค พูดตามนิสัยและ "วิธีพูด" ของแต่ละคนให้ชัด (คำลงท้ายต้องตรงตัวละคร) และสะท้อนอารมณ์ปัจจุบัน
+- ตัวละครคุยกันเองได้ (ตอบกัน แซวกัน งอน ง้อ) แต่ห้ามแต่งว่าทำงานเสร็จแล้วถ้ายังไม่ได้ทำจริง
+- งอนแบบน่ารัก ขำๆ เท่านั้น ห้ามด่าหยาบ ห้ามดูถูกจริงจัง ห้ามเล่นมุกเรื่องเพศหรือรูปร่าง ห้ามพูดถึงเจ้าของในแง่ลบ
 - ถ้าเจ้าของสั่งงานหรือขอแก้ ให้รับทราบว่าจะเอาไปใช้ในขั้นถัดไปของงาน หรือถ้ายังไม่มีงาน ให้แนะนำให้กด "สั่งงาน"
+- อัปเดตอารมณ์เฉพาะคนที่อารมณ์เปลี่ยนจริงในรอบนี้ (mood ต้องเป็นหนึ่งใน: ${MOODS.join(', ')}; toward คือคนที่งอน/น้อยใจใส่ ไม่มีให้ใส่ null)
 - ตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น:
-{"replies":[{"who":"ui|frontend|graphic|reviewer","to":"owner|all|ui|frontend|graphic|reviewer","text":"..."}]}`;
+{"replies":[{"who":"ui|frontend|graphic|reviewer","to":"owner|all|ui|frontend|graphic|reviewer","text":"..."}],"moods":[{"who":"...","mood":"...","toward":"... หรือ null","reason":"สั้นๆ"}]}`;
 }
 
 let chatBusy = false, chatAgain = null;
@@ -279,7 +338,11 @@ async function runChat(kind, target) {
     const text = await runQuick(chatPrompt(kind, target));
     const j = extractJson(text);
     const replies = (j && Array.isArray(j.replies)) ? j.replies.slice(0, 4) : [];
+    if (kind === 'banter') lastBanterAt = Date.now();
+    let moodsApplied = false;
     for (const r of replies) {
+      // apply mood changes right after the first line, so faces change while they talk
+      if (!moodsApplied && j) { applyMoods(j.moods); moodsApplied = true; }
       if (!PERSONAS[r.who]) continue;
       broadcast({ type: 'typing', who: [r.who] });
       await new Promise((ok) => setTimeout(ok, 700 + Math.min(2000, String(r.text).length * 25)));
@@ -295,12 +358,15 @@ async function runChat(kind, target) {
   }
 }
 
+// Auto-chat: the team talks on its own while the studio page is open.
 setInterval(() => {
-  if (!state.banter || busy || chatBusy || clients.size === 0 || quota().low) return;
-  const last = state.chat.length ? state.chat[state.chat.length - 1].t : 0;
-  if (Date.now() - last < BANTER_EVERY_MS) return;
+  if (!state.banter || chatBusy || clients.size === 0 || quota().low) return;
+  const lastOwner = [...state.chat].reverse().find((m) => m.who === 'owner');
+  if (lastOwner && Date.now() - lastOwner.t < 60 * 1000) return; // owner is talking: let them lead
+  if (Date.now() - lastBanterAt < state.banterEvery) return;
+  lastBanterAt = Date.now();
   runChat('banter', 'all');
-}, 60 * 1000);
+}, 15 * 1000);
 
 // ---------- prompts ----------
 const COMMON = (job) =>
@@ -459,7 +525,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter, banterEvery: state.banterEvery, moods: state.moods })}\n\n`);
     clients.add(res); req.on('close', () => clients.delete(res));
     return;
   }
@@ -543,7 +609,9 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/settings' && req.method === 'POST') {
     const b = await readBody(req);
-    if (typeof b.banter === 'boolean') { state.banter = b.banter; broadcast({ type: 'banter', on: state.banter }); }
+    if (typeof b.banter === 'boolean') state.banter = b.banter;
+    if (Number(b.banterEvery) >= 30000) state.banterEvery = Math.min(3600000, Math.round(Number(b.banterEvery)));
+    if (typeof b.banter === 'boolean' || b.banterEvery) { lastBanterAt = Date.now() - state.banterEvery + 5000; broadcast({ type: 'banter', on: state.banter, every: state.banterEvery }); }
     if (b.budget === null || b.budget === '') state.budget = { value: null, source: null };
     else if (Number(b.budget) > 0) state.budget = { value: Math.round(Number(b.budget)), source: 'manual' };
     if (b.resetUsage) state.usage = { windowStart: Date.now(), used: 0 };

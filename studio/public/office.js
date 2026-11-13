@@ -72,8 +72,11 @@
     const pl = document.createElement('div');
     pl.className = 'plate'; pl.textContent = a.name;
     pl.style.left = (a.x / W * 100) + '%'; pl.style.top = ((a.y + 19) / H * 100) + '%';
-    office.append(b, pl);
-    a.bubbleEl = b; a.plateEl = pl;
+    const mb = document.createElement('div');
+    mb.className = 'mood-badge';
+    mb.style.left = ((a.x + 15) / W * 100) + '%'; mb.style.top = ((a.y - 22) / H * 100) + '%';
+    office.append(b, pl, mb);
+    a.bubbleEl = b; a.plateEl = pl; a.moodEl = mb;
   }
 
   function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), w, h); }
@@ -108,7 +111,9 @@
   function drawAgent(k, t) {
     const a = AGENTS[k], st = status[k].state;
     const working = st === 'working';
-    const bob = reduced ? 0 : working ? ((t >> 2) % 2) : ((t >> 4) % 2);
+    const sulky = a.mood === 'งอน' || a.mood === 'น้อยใจ';
+    const happy = a.mood === 'ดีใจ' || a.mood === 'ตื่นเต้น';
+    const bob = reduced ? 0 : working ? ((t >> 2) % 2) : sulky ? 1 : happy ? ((t >> 1) % 3 === 0 ? -1 : 0) : ((t >> 4) % 2);
     const blink = !reduced && (t % 70) < 3;
     const sx = a.x - 12, sy = a.y - 22 + bob;
     // chair back
@@ -116,6 +121,9 @@
     // body sprite
     const pal = { H: a.hair, S: C.skin, E: blink ? C.skin : C.eye, T: a.shirt, G: '#C9D1D9', P: a.p, Q: a.q };
     a.map.forEach((row, y) => row.forEach((ch, x) => { if (ch !== '.') rect(sx + x * PX, sy + y * PX, PX, PX, pal[ch]); }));
+    // sulking: puffed pink cheeks + frown; happy: blush
+    if (sulky) { rect(sx + 4, sy + 11, 2, 2, '#F472B6'); rect(sx + 18, sy + 11, 2, 2, '#F472B6'); rect(sx + 10, sy + 13, 4, 1, '#8A5A44'); }
+    if (happy) { rect(sx + 4, sy + 11, 2, 1, '#F9A8D4'); rect(sx + 18, sy + 11, 2, 1, '#F9A8D4'); }
     // desk
     rect(a.x - 32, a.y, 64, 4, C.deskEdge); rect(a.x - 32, a.y + 4, 64, 12, C.desk); rect(a.x - 32, a.y + 14, 64, 2, C.deskFront);
     rect(a.x - 30, a.y + 16, 4, 4, C.deskFront); rect(a.x + 26, a.y + 16, 4, 4, C.deskFront);
@@ -187,5 +195,12 @@
       a.sayTimer = setTimeout(() => { a.sayText = ''; paint(key); }, 6000);
     },
     onPick(fn) { onPick = fn; },
+    mood(key, mood, emoji, label) {
+      const a = AGENTS[key]; if (!a) return;
+      a.mood = mood;
+      a.moodEl.textContent = emoji || '';
+      a.moodEl.classList.toggle('hot', mood === 'งอน' || mood === 'น้อยใจ');
+      a.plateEl.title = label || '';
+    },
   };
 })();
