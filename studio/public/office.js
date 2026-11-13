@@ -51,10 +51,9 @@
     if (kind === 'reviewer') { // glasses
       m[4] = '..GEGSSGEG..'.split('');
     }
-    if (kind === 'quant') { // ponytail + headband
-      for (let x = 2; x <= 9; x++) set(1, x, 'P');
-      for (let y = 2; y <= 6; y++) set(y, 11, 'H');
-      set(3, 10, 'H'); set(4, 10, 'H');
+    if (kind === 'quant') { // backwards cap
+      for (let x = 2; x <= 9; x++) { set(0, x, 'P'); set(1, x, 'P'); }
+      set(1, 1, 'Q'); set(1, 10, 'Q'); set(2, 10, 'Q'); set(2, 11, 'Q');
     }
     return m;
   }
