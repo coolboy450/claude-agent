@@ -33,8 +33,25 @@
       <section class="card chat-card" aria-labelledby="chat-title">
         <div class="row-between">
           <h2 id="chat-title" class="label">&gt; ห้องแชททีม</h2>
-          <label class="toggle small"><input type="checkbox" id="banter"> คุยเล่นตอนว่าง</label>
+          <label class="toggle small" for="banter-every">ทีมคุยกันเอง
+            <select id="banter-every" class="mini">
+              <option value="0">ปิด</option>
+              <option value="60000">ทุก 1 นาที</option>
+              <option value="180000">ทุก 3 นาที</option>
+              <option value="600000">ทุก 10 นาที</option>
+              <option value="custom">ตั้งเอง…</option>
+            </select>
+          </label>
         </div>
+        <form class="custom-every" id="custom-every" hidden>
+          <label class="small" for="custom-min">คุยกันเองทุกกี่นาที (0.5–60)</label>
+          <div class="row">
+            <input id="custom-min" type="number" min="0.5" max="60" step="0.5" inputmode="decimal" required>
+            <button class="btn btn-primary" type="submit">ตั้งค่า</button>
+            <button class="btn btn-ghost" type="button" id="custom-cancel">ยกเลิก</button>
+          </div>
+        </form>
+        <ul class="moods" id="moods" aria-label="อารมณ์ของทีม"></ul>
         <ul class="chat" id="chat" aria-live="polite"></ul>
         <p class="typing small" id="typing" aria-live="polite"></p>
         <form class="chat-form" id="chat-form">
@@ -46,7 +63,7 @@
           <input id="chat-text" type="text" autocomplete="off" maxlength="600" placeholder="พิมพ์คุยกับทีม… (คลิกตัวละครเพื่อคุยเฉพาะคน)">
           <button class="btn btn-primary" type="submit">ส่ง</button>
         </form>
-        <p class="muted small">ข้อความของคุณจะถูกส่งให้ทีมใช้ในขั้นถัดไปของงานด้วย · แชทใช้ Haiku เพื่อประหยัดโควตา</p>
+        <p class="muted small">ข้อความของคุณจะถูกส่งให้ทีมใช้ในขั้นถัดไปของงานด้วย · แชทใช้ Haiku ประมาณ 1k โทเค็นต่อรอบ · ทีมคุยกันเองเฉพาะตอนเปิดหน้านี้ไว้</p>
       </section>
 
       <details class="card log-card">
