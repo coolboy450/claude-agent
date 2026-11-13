@@ -115,17 +115,28 @@ function moodSheet() {
     return `- ${chatName(k)}: ${m.mood}${m.toward ? ' ใส่ ' + chatName(m.toward) : ''}${m.reason ? ' (เพราะ ' + m.reason + ')' : ''} — เป็นมา ${mins} นาที`;
   }).join('\n');
 }
+const SULK = ['งอน', 'น้อยใจ'];
+const SULK_COOLDOWN_MS = 20 * 60 * 1000; // after making up, no new sulk for this person for 20 min
+let plot = { sulker: null };             // who the server allowed to start sulking this round
+
 function applyMoods(list) {
   if (!Array.isArray(list)) return;
   let changed = false;
   for (const u of list.slice(0, 4)) {
     if (!PERSONAS[u.who] || !MOODS.includes(u.mood)) continue;
-    const toward = PERSONAS[u.toward] && u.toward !== u.who ? u.toward : null;
     const cur = state.moods[u.who];
+    const wasSulking = cur && SULK.includes(cur.mood);
+    // Only the sulker the server picked may start sulking; the model can't add more on its own.
+    if (SULK.includes(u.mood) && !wasSulking && u.who !== plot.sulker) continue;
+    const toward = PERSONAS[u.toward] && u.toward !== u.who ? u.toward : null;
     if (cur && cur.mood === u.mood && cur.toward === toward) continue;
-    state.moods[u.who] = { mood: u.mood, toward, reason: short(u.reason || '', 80), since: Date.now() };
+    state.moods[u.who] = {
+      mood: u.mood, toward, reason: short(u.reason || '', 80), since: Date.now(),
+      calmUntil: wasSulking && !SULK.includes(u.mood) ? Date.now() + SULK_COOLDOWN_MS : (cur && cur.calmUntil) || 0,
+    };
     changed = true;
   }
+  plot.sulker = null;
   if (changed) { save(); broadcast({ type: 'moods', moods: state.moods }); }
 }
 
@@ -277,26 +288,34 @@ function jobLine() {
 
 // The server steers the drama so it reliably happens: who starts sulking, and when they make up.
 function plotHint() {
+  plot.sulker = null;
   const keys = Object.keys(PERSONAS);
-  const sulking = keys.filter((k) => ['งอน', 'น้อยใจ'].includes(state.moods[k].mood));
+  const sulking = keys.filter((k) => SULK.includes(state.moods[k].mood));
   if (sulking.length) {
-    const k = sulking[0], m = state.moods[k], mins = (Date.now() - m.since) / 60000;
+    const oldest = Math.min(...sulking.map((k) => state.moods[k].since));
+    const mins = (Date.now() - oldest) / 60000;
+    const list = sulking.map((k) => `${chatName(k)} (${state.moods[k].mood}${state.moods[k].toward ? 'ใส่' + chatName(state.moods[k].toward) : ''})`).join(', ');
     if (mins >= 6 && Math.random() < 0.5) {
-      return `\nบทรอบนี้: ให้${m.toward ? chatName(m.toward) + 'หรือคนอื่น' : 'ใครสักคน'}ง้อ${chatName(k)}จนหายงอน แล้วอัปเดตอารมณ์ ${k} เป็น ดีใจ (toward null)`;
+      return `\nบทรอบนี้: คืนดีกันให้ครบทุกคนที่งอนอยู่: ${list} — มีคนง้อหรือขอโทษตามนิสัย แล้วอัปเดตอารมณ์ของ ${sulking.join(', ')} เป็น ดีใจ (toward null) ห้ามมีใครงอนเพิ่ม`;
     }
-    return `\nบทรอบนี้: ${chatName(k)}ยัง${m.mood}${m.toward ? 'ใส่' + chatName(m.toward) : ''}อยู่ คนอื่นสังเกตหรือแซว แต่ยังไม่หายงอน (ไม่ต้องอัปเดตอารมณ์ ${k})`;
+    return `\nบทรอบนี้: ${list} ยังงอนอยู่ คนอื่นสังเกตหรือแซว แต่ยังไม่หาย ห้ามมีใครงอนเพิ่ม (ไม่ต้องอัปเดตอารมณ์ของคนที่งอนอยู่)`;
   }
-  if (Math.random() < 0.4) {
-    const a = keys[Math.floor(Math.random() * keys.length)];
-    const others = keys.filter((x) => x !== a);
+  // Start a new sulk? Pick by personality: higher sulkiness = more likely. Recently-made-up people are skipped.
+  const now = Date.now();
+  const cands = keys.filter((k) => !(state.moods[k].calmUntil > now));
+  for (const k of cands.sort(() => Math.random() - 0.5)) {
+    if (Math.random() >= PERSONAS[k].sulkiness * 0.5) continue; // ~40% chance per round that someone starts
+    const others = keys.filter((x) => x !== k);
     const b = others[Math.floor(Math.random() * others.length)];
-    const mood = Math.random() < 0.6 ? 'งอน' : 'น้อยใจ';
-    return `\nบทรอบนี้: เกิดเรื่องเล็กๆ ที่ทำให้${chatName(a)}${mood}${chatName(b)} (คิดเหตุผลขำๆ ให้เข้ากับนิสัยทั้งสองคน) แล้วอัปเดตอารมณ์ ${a} เป็น ${mood} toward ${b}`;
+    const mood = PERSONAS[k].sulkMood || 'งอน';
+    plot.sulker = k;
+    return `\nบทรอบนี้: เกิดเรื่องเล็กๆ ที่ทำให้${chatName(k)}${mood}${chatName(b)} (คิดเหตุผลขำๆ ให้เข้ากับนิสัยทั้งสองคน) แล้วอัปเดตอารมณ์ ${k} เป็น ${mood} toward ${b} — คนอื่นห้ามงอน`;
   }
-  return '';
+  return '\nบทรอบนี้: ไม่มีใครงอน ห้ามใครงอนหรือน้อยใจในรอบนี้';
 }
 
 function chatPrompt(kind, target) {
+  if (kind !== 'banter') plot.sulker = null; // replies to the owner never start a new sulk
   const who = kind === 'banter'
     ? `ไม่มีใครทักมา ให้ทีมคุยกันเองต่อจากแชทล่าสุด 2–4 ข้อความ (2–3 คน) ${activeJob() ? 'เรื่องงานที่ทำอยู่ บ่น แซว ให้กำลังใจกัน' : 'เรื่องชีวิตในออฟฟิศ กาแฟ ชานม แมวนูบ มีม ดีไซน์ ฯลฯ'}
 ดำเนินเรื่องต่อเนื่องเหมือนละครออฟฟิศสั้นๆ:
