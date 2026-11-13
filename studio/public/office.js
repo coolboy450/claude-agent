@@ -51,6 +51,11 @@
     if (kind === 'reviewer') { // glasses
       m[4] = '..GEGSSGEG..'.split('');
     }
+    if (kind === 'quant') { // ponytail + headband
+      for (let x = 2; x <= 9; x++) set(1, x, 'P');
+      for (let y = 2; y <= 6; y++) set(y, 11, 'H');
+      set(3, 10, 'H'); set(4, 10, 'H');
+    }
     return m;
   }
 
@@ -59,6 +64,7 @@
     frontend: { x: 236, y: 92,  hair: '#2B2118', shirt: C.accent, p: '#5E6570', q: '#5E6570', name: 'บิต · Frontend' },
     graphic:  { x: 84,  y: 156, hair: '#6B3B1F', shirt: C.warn,   p: C.red,     q: '#B44B4B', name: 'ป๊อป · กราฟิก' },
     reviewer: { x: 236, y: 156, hair: '#8B949E', shirt: C.text,   p: '#5E6570', q: '#5E6570', name: 'ครูแว่น · ตรวจ' },
+    quant:    { x: 160, y: 72,  hair: '#1F2937', shirt: '#38BDF8', p: '#38BDF8', q: '#38BDF8', name: 'แบงก์ · บอทเทรด' },
   };
   const status = {};
   for (const k in AGENTS) { AGENTS[k].map = variant(k); status[k] = { state: 'idle', bubble: '' }; }
@@ -155,7 +161,7 @@
       last = now; t++;
       ctx.clearRect(0, 0, W, H);
       drawRoom(t);
-      ['ui', 'frontend', 'graphic', 'reviewer'].forEach((k) => drawAgent(k, t));
+      ['quant', 'ui', 'frontend', 'graphic', 'reviewer'].forEach((k) => drawAgent(k, t));
       drawCat(t);
     }
     requestAnimationFrame(frame);
