@@ -43,7 +43,7 @@ const PUBLIC_PERSONAS = Object.fromEntries(Object.entries(PERSONAS).map(([k, p])
 
 // ---------- claude binary ----------
 function findClaude() {
-  if (process.env.CLAUDE_BIN) return { cmd: process.env.CLAUDE_BIN, shell: false };
+  if (process.env.CLAUDE_BIN) return { cmd: process.env.CLAUDE_BIN, shell: /\.(cmd|bat)$/i.test(process.env.CLAUDE_BIN) };
   const appdata = process.env.APPDATA || '';
   const exe = path.join(appdata, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
   if (appdata && fs.existsSync(exe)) return { cmd: exe, shell: false };
@@ -191,9 +191,9 @@ function describeTool(c) {
   return `${verb} ${base || short(i.command, 40) || ''}`.trim();
 }
 
-function runAgent(job, key, prompt) {
+function runAgent(job, key, prompt, modelOverride) {
   return new Promise((resolve, reject) => {
-    const model = modelFor(key);
+    const model = modelOverride && !quota().low ? modelOverride : modelFor(key);
     const args = ['-p', '--agent', AGENTS[key].name, '--model', model,
       '--output-format', 'stream-json', '--verbose',
       '--permission-mode', 'acceptEdits',
@@ -413,7 +413,9 @@ function draftPrompt(job) {
 {"options":[{"id":"A","title":"ชื่อสั้น","summary":"1–2 บรรทัด"}],${SAY('เจ้าของ ชวนให้มาเลือกแผน')}}
 \`\`\``;
   }
-  const what = job.kind === 'graphic' ? 'กราฟิก (แสดงแต่ละแบบในขนาดจริงตามคู่มือหมวด 7)' : 'หน้าเว็บ/embed';
+  const what = job.kind === 'graphic' ? 'กราฟิก (แสดงแต่ละแบบในขนาดจริงตามคู่มือหมวด 7)'
+    : job.kind === 'team' ? 'หน้าจอ (งานทั้งทีม: อ่านโค้ดโปรเจกต์ก่อนว่ามีข้อมูลอะไรให้แสดง แล้วใส่ข้อมูลตัวอย่างที่สมจริง แบงก์จะทำหลังบ้าน บิตจะเขียนหน้าจอ ป๊อปจะทำไอคอน)'
+    : 'หน้าเว็บ/embed';
   return `${COMMON(job)}
 ทำแบบร่าง${what} 2–3 ทิศทางตามบทบาทของคุณ
 บันทึกทุกแบบไว้ในไฟล์เดียว: ${path.join(job.workDir, 'drafts.html')} (เปิดดูได้ทันที มีหัวข้อ "แบบ A", "แบบ B", ...)
@@ -479,9 +481,45 @@ ${makerSummary}
 
 // ---------- pipeline ----------
 let busy = false;
-function makerKey(job) { return job.kind === 'code' ? 'quant' : job.kind === 'graphic' ? 'graphic' : 'frontend'; }
+function makerKey(job) { return job.kind === 'code' ? 'quant' : job.kind === 'team' ? 'all' : job.kind === 'graphic' ? 'graphic' : 'frontend'; }
 function designerKey(job) { return job.kind === 'code' ? 'quant' : job.kind === 'graphic' ? 'graphic' : 'ui'; }
 function reviewerKey(job) { return job.kind === 'code' ? 'quant' : 'reviewer'; } // code is re-checked by the quant dev with tests
+
+// "ทั้งทีม" jobs: everyone gets a part. Steps run one after another, each sees the previous summaries.
+function teamBuildPrompt(job, role, note, before) {
+  const opt = (job.options || []).find((o) => o.id === job.chosen) || { id: job.chosen, title: '' };
+  const api = path.join(job.workDir, 'api.md');
+  const fix = note ? `\n\nรอบแก้ไข — แก้เฉพาะที่เกี่ยวกับส่วนของคุณ:\n${note}` : '';
+  const prev = before ? `\nเพื่อนในทีมทำไปแล้ว:\n${before}\n` : '';
+  const head = `${COMMON(job)}
+งานนี้ทำทั้งทีม เจ้าของเลือกแบบหน้าจอ "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}${prev}`;
+  const tail = `\nสรุปท้ายคำตอบ: ไฟล์ที่สร้าง/แก้${fix}\nแล้วปิดท้ายด้วยบล็อก \`\`\`json {${SAY('ทีม ตอนส่งต่องาน')}} \`\`\``;
+  if (role === 'quant') return `${head}
+ส่วนของคุณ: ระบบหลังบ้าน ลอจิก และข้อมูลที่หน้าจอต้องใช้ (เช่น API/endpoint, ไฟล์สถานะ) ในโปรเจกต์ ${job.projectPath} — ยังไม่ต้องทำหน้าจอ
+เขียนสัญญาข้อมูลให้บิตใช้ที่ ${api} (endpoint, method, ตัวอย่าง JSON)
+รัน python -m pytest -q ด้วย Python ใน .venv และรายงานผลตามจริง ${CODE_RULES}${tail}`;
+  if (role === 'frontend') return `${head}
+ส่วนของคุณ: ทำหน้าจอตามแบบที่เจ้าของเลือก ใช้ข้อมูลตาม ${api} วางไฟล์หน้าเว็บในโฟลเดอร์หน้าเว็บของโปรเจกต์ (เช่น static/) ถ้าต้องเพิ่ม route เสิร์ฟหน้า ให้แก้น้อยที่สุด
+ห้ามแก้ลอจิกหลังบ้านของแบงก์ ห้าม commit/push${tail}`;
+  return `${head}
+ส่วนของคุณ: ไอคอน/กราฟิกเล็กๆ ที่หน้าจอนี้ใช้ (SVG, ไม่เกิน 6 ชิ้น) วางในโฟลเดอร์เดียวกับไฟล์หน้าเว็บที่บิตทำ ไม่ต้องทำแบบร่าง ห้ามแก้โค้ด${tail}`;
+}
+
+function buildSteps(job) {
+  if (job.kind !== 'team') return [{ key: makerKey(job), prompt: (note) => buildPrompt(job, note) }];
+  return [
+    { key: 'quant',    prompt: (note, before) => teamBuildPrompt(job, 'quant', note, before) },
+    { key: 'frontend', prompt: (note, before) => teamBuildPrompt(job, 'frontend', note, before) },
+    { key: 'graphic',  prompt: (note, before) => teamBuildPrompt(job, 'graphic', note, before), model: 'sonnet' }, // icons only: save quota
+  ];
+}
+function reviewSteps(job, summary) {
+  if (job.kind !== 'team') return [{ key: reviewerKey(job), prompt: reviewPrompt(job, summary) }];
+  return [
+    { key: 'quant', prompt: reviewPrompt({ ...job, kind: 'code' }, summary) },     // tests + rules
+    { key: 'reviewer', prompt: reviewPrompt({ ...job, kind: 'web' }, summary) },   // brand checklist on the UI
+  ];
+}
 
 async function stage(job, fn) {
   busy = true; job.status = 'running'; job.error = null; pushJob(job);
@@ -520,19 +558,35 @@ function runDrafts(job) {
 function runBuildAndReview(job, fixNote) {
   return stage(job, async () => {
     let note = fixNote || null;
+    const maxFixes = job.kind === 'team' ? 1 : MAX_REVIEW_FIXES; // team rounds are big: one fix round max
     for (let round = 0; ; round++) {
       job.stage = 'build';
-      job.makerSummary = await runAgent(job, makerKey(job), buildPrompt(job, note));
-      const ms = extractJson(job.makerSummary);
-      if (ms && ms.say) postChat(makerKey(job), 'reviewer', ms.say);
+      const parts = [];
+      for (const s of buildSteps(job)) {
+        const out = await runAgent(job, s.key, s.prompt(note, parts.join('\n\n')), s.model);
+        parts.push(`## ${PERSONAS[s.key] ? PERSONAS[s.key].name : s.key}\n${out}`);
+        const ms = extractJson(out);
+        if (ms && ms.say) postChat(s.key, job.kind === 'team' ? 'all' : reviewerKey(job), ms.say);
+      }
+      job.makerSummary = parts.join('\n\n');
       job.stage = 'review';
-      const rtext = await runAgent(job, reviewerKey(job), reviewPrompt(job, job.makerSummary));
-      const r = extractJson(rtext) || { verdict: 'fail', issues: ['ผู้ตรวจไม่ได้ส่งผลในรูปแบบที่อ่านได้'] };
-      if (r.say) postChat(reviewerKey(job), reviewerKey(job) === makerKey(job) ? 'all' : makerKey(job), r.say);
-      job.review = { verdict: String(r.verdict).includes('pass') ? 'pass' : 'fail', issues: r.issues || [], text: rtext };
-      if (job.review.verdict === 'pass') { setAgent(reviewerKey(job), 'idle', 'ผ่าน ✅'); break; }
-      setAgent(reviewerKey(job), 'idle', `ตีกลับ ❌ ${job.review.issues.length} ข้อ`);
-      if (round >= MAX_REVIEW_FIXES) { log(job, 'studio', 'แก้ครบรอบแล้วยังไม่ผ่าน ส่งให้เจ้าของตัดสิน'); break; }
+      const verdicts = [];
+      for (const s of reviewSteps(job, job.makerSummary)) {
+        const rtext = await runAgent(job, s.key, s.prompt);
+        const r = extractJson(rtext) || { verdict: 'fail', issues: ['ผู้ตรวจไม่ได้ส่งผลในรูปแบบที่อ่านได้'] };
+        if (r.say) postChat(s.key, job.kind === 'team' || s.key === makerKey(job) ? 'all' : makerKey(job), r.say);
+        const pass = String(r.verdict).includes('pass');
+        setAgent(s.key, 'idle', pass ? 'ผ่าน ✅' : `ตีกลับ ❌ ${(r.issues || []).length} ข้อ`);
+        verdicts.push({ who: s.key, pass, issues: r.issues || [], text: rtext });
+      }
+      const name = (k) => (PERSONAS[k] ? PERSONAS[k].name : k);
+      job.review = {
+        verdict: verdicts.every((v) => v.pass) ? 'pass' : 'fail',
+        issues: verdicts.flatMap((v) => v.issues.map((i) => verdicts.length > 1 ? `[${name(v.who)}] ${i}` : i)),
+        text: verdicts.map((v) => v.text).join('\n\n'),
+      };
+      if (job.review.verdict === 'pass') break;
+      if (round >= maxFixes) { log(job, 'studio', 'แก้ครบรอบแล้วยังไม่ผ่าน ส่งให้เจ้าของตัดสิน'); break; }
       note = job.review.issues.join('\n');
     }
     job.stage = 'approve'; job.status = 'waiting_approval';
@@ -597,7 +651,7 @@ const server = http.createServer(async (req, res) => {
     if (busy) return json(res, 409, { error: 'ทีมกำลังทำงานอยู่' });
     const b = await readBody(req);
     const brief = String(b.brief || '').trim();
-    const kind = ['graphic', 'code'].includes(b.kind) ? b.kind : 'web';
+    const kind = ['graphic', 'code', 'team'].includes(b.kind) ? b.kind : 'web';
     let projectPath = String(b.project || '');
     if (b.newProject) {
       const name = String(b.newProject).trim().replace(/[^\w\-ก-๙ .]/g, '').slice(0, 60);
