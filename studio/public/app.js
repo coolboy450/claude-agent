@@ -79,7 +79,7 @@
     renderStepper();
     if (!job) return;
     $('job-brief').textContent = job.brief;
-    $('job-meta').textContent = `${job.kind === 'graphic' ? 'กราฟิก' : 'เว็บ / embed'} · ${job.projectPath}`;
+    $('job-meta').textContent = `${{ graphic: 'กราฟิก', code: 'โค้ด / บอท' }[job.kind] || 'เว็บ / embed'} · ${job.projectPath}`;
     $('job-status').textContent = STATUS[job.status] || job.status;
     $('job-error-wrap').hidden = !job.error;
     $('job-error').textContent = job.error || '';

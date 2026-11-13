@@ -37,6 +37,7 @@ const AGENTS = {
   graphic:  { name: 'noob-graphic-designer', label: 'นักออกแบบกราฟิก',   model: 'opus' },
   frontend: { name: 'noob-frontend-dev',     label: 'นักพัฒนา Frontend', model: 'sonnet' },
   reviewer: { name: 'noob-brand-reviewer',   label: 'ผู้ตรวจคุณภาพ',      model: 'sonnet' },
+  quant:    { name: 'noob-quant-dev',        label: 'นักพัฒนาบอทเทรด',  model: 'sonnet' },
 };
 const PUBLIC_PERSONAS = Object.fromEntries(Object.entries(PERSONAS).map(([k, p]) => [k, { name: p.name, emoji: p.emoji, role: p.role, color: p.color, gender: p.gender }]));
 
@@ -197,6 +198,10 @@ function runAgent(job, key, prompt) {
       '--output-format', 'stream-json', '--verbose',
       '--permission-mode', 'acceptEdits',
       '--add-dir', BRAND_DIR, '--add-dir', job.workDir];
+    // code jobs: allow running Python/tests and read-only git, nothing else from the shell
+    if (key === 'quant') args.push('--allowedTools',
+      'Bash(.venv/bin/python:*)', 'Bash(.venv\\Scripts\\python:*)', 'Bash(python3:*)', 'Bash(python:*)',
+      'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(ls:*)');
     setAgent(key, 'working', `เริ่มงาน (${model})`);
     log(job, key, `เริ่มทำงานด้วยโมเดล ${model}`);
 
@@ -346,7 +351,7 @@ ${who}
 - ถ้าเจ้าของสั่งงานหรือขอแก้ ให้รับทราบว่าจะเอาไปใช้ในขั้นถัดไปของงาน หรือถ้ายังไม่มีงาน ให้แนะนำให้กด "สั่งงาน"
 - อัปเดตอารมณ์เฉพาะคนที่อารมณ์เปลี่ยนจริงในรอบนี้ (mood ต้องเป็นหนึ่งใน: ${MOODS.join(', ')}; toward คือคนที่งอน/น้อยใจใส่ ไม่มีให้ใส่ null)
 - ตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น:
-{"replies":[{"who":"ui|frontend|graphic|reviewer","to":"owner|all|ui|frontend|graphic|reviewer","text":"..."}],"moods":[{"who":"...","mood":"...","toward":"... หรือ null","reason":"สั้นๆ"}]}`;
+{"replies":[{"who":"${Object.keys(PERSONAS).join('|')}","to":"owner|all|${Object.keys(PERSONAS).join('|')}","text":"..."}],"moods":[{"who":"...","mood":"...","toward":"... หรือ null","reason":"สั้นๆ"}]}`;
 }
 
 let chatBusy = false, chatAgain = null;
@@ -395,7 +400,19 @@ const COMMON = (job) =>
   `\nแชทล่าสุดในห้องทีม (ถ้าเจ้าของสั่งหรือขอเพิ่มอะไรไว้ ให้ทำตามด้วย):\n${recentChat(12)}\n`;
 const SAY = (to) => `"say":"ข้อความสั้น 1 ประโยคตามนิสัยของคุณ ถึง${to}"`;
 
+const CODE_RULES = 'กฎ: Paper trading เท่านั้น ห้ามเปิดเงินจริง ห้ามแตะ .env/ความลับ ห้ามใช้บริการที่เสียเงิน ห้าม commit/push';
+
 function draftPrompt(job) {
+  if (job.kind === 'code') {
+    return `${COMMON(job)}
+อ่านโค้ดที่เกี่ยวข้องในโปรเจกต์ก่อน แล้วเสนอแผนทำงานนี้ 2 แนวทาง (เช่น แบบเร็ว/เล็ก กับ แบบครบ/ใหญ่) พร้อมข้อดีข้อเสีย ไฟล์ที่จะแตะ และความเสี่ยง
+บันทึกเป็นหน้า HTML อ่านง่ายไฟล์เดียว: ${path.join(job.workDir, 'drafts.html')} (หัวข้อ "แบบ A", "แบบ B")
+ยังห้ามแก้ไฟล์ในโปรเจกต์ ${CODE_RULES}
+จบคำตอบด้วยบล็อกนี้ (ห้ามมีข้อความหลังบล็อก):
+\`\`\`json
+{"options":[{"id":"A","title":"ชื่อสั้น","summary":"1–2 บรรทัด"}],${SAY('เจ้าของ ชวนให้มาเลือกแผน')}}
+\`\`\``;
+  }
   const what = job.kind === 'graphic' ? 'กราฟิก (แสดงแต่ละแบบในขนาดจริงตามคู่มือหมวด 7)' : 'หน้าเว็บ/embed';
   return `${COMMON(job)}
 ทำแบบร่าง${what} 2–3 ทิศทางตามบทบาทของคุณ
@@ -410,6 +427,14 @@ function draftPrompt(job) {
 function buildPrompt(job, fixNote) {
   const opt = (job.options || []).find((o) => o.id === job.chosen) || { id: job.chosen, title: '' };
   const fix = fixNote ? `\n\nรอบแก้ไข — แก้ตามนี้:\n${fixNote}` : '';
+  if (job.kind === 'code') {
+    return `${COMMON(job)}
+เจ้าของเลือก "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}
+ลงมือทำตามแผนนี้ในโปรเจกต์ ${job.projectPath} แล้วรัน python -m pytest -q ด้วย Python ใน .venv ของโปรเจกต์ (ถ้ามี)
+${CODE_RULES}
+สรุปท้ายคำตอบ: ไฟล์ที่แก้ + ผลเทส (ผ่าน/ตกกี่ข้อ ตามจริง) + สิ่งที่ยังไม่ได้ทำ${fix}
+แล้วปิดท้ายด้วยบล็อก \`\`\`json {${SAY('ทีม ตอนทำเสร็จ')}} \`\`\``;
+  }
   if (job.kind === 'graphic') {
     return `${COMMON(job)}
 เจ้าของเลือก "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}
@@ -426,6 +451,20 @@ function buildPrompt(job, fixNote) {
 }
 
 function reviewPrompt(job, makerSummary) {
+  if (job.kind === 'code') {
+    return `${COMMON(job)}
+ตรวจงานโค้ดชิ้นนี้อีกรอบแบบละเอียด:
+1) รัน python -m pytest -q ใหม่ด้วย Python ใน .venv ของโปรเจกต์ แล้วรายงานผลตามจริง
+2) ดู git diff ว่าเปลี่ยนตรงกับแผนที่เจ้าของเลือก ไม่มีของเกิน
+3) เช็กกฎ: ไม่มีการเปิดเงินจริง ไม่มีความลับ/คีย์ในโค้ด ไม่มีบริการเสียเงิน
+สรุปจากรอบที่แล้ว:
+${makerSummary}
+ห้ามแก้ไฟล์ในรอบนี้
+จบคำตอบด้วยบล็อกนี้ (ห้ามมีข้อความหลังบล็อก):
+\`\`\`json
+{"verdict":"pass หรือ fail","issues":["ไฟล์:บรรทัด → ผิดอะไร → ควรเป็นอะไร"],${SAY('ทีม')}}
+\`\`\``;
+  }
   return `${COMMON(job)}
 ตรวจงานชิ้นนี้ตาม Checklist หมวด 8 ทุกข้อ
 สรุปจากผู้ทำงาน:
@@ -440,8 +479,9 @@ ${makerSummary}
 
 // ---------- pipeline ----------
 let busy = false;
-function makerKey(job) { return job.kind === 'graphic' ? 'graphic' : 'frontend'; }
-function designerKey(job) { return job.kind === 'graphic' ? 'graphic' : 'ui'; }
+function makerKey(job) { return job.kind === 'code' ? 'quant' : job.kind === 'graphic' ? 'graphic' : 'frontend'; }
+function designerKey(job) { return job.kind === 'code' ? 'quant' : job.kind === 'graphic' ? 'graphic' : 'ui'; }
+function reviewerKey(job) { return job.kind === 'code' ? 'quant' : 'reviewer'; } // code is re-checked by the quant dev with tests
 
 async function stage(job, fn) {
   busy = true; job.status = 'running'; job.error = null; pushJob(job);
@@ -486,17 +526,17 @@ function runBuildAndReview(job, fixNote) {
       const ms = extractJson(job.makerSummary);
       if (ms && ms.say) postChat(makerKey(job), 'reviewer', ms.say);
       job.stage = 'review';
-      const rtext = await runAgent(job, 'reviewer', reviewPrompt(job, job.makerSummary));
+      const rtext = await runAgent(job, reviewerKey(job), reviewPrompt(job, job.makerSummary));
       const r = extractJson(rtext) || { verdict: 'fail', issues: ['ผู้ตรวจไม่ได้ส่งผลในรูปแบบที่อ่านได้'] };
-      if (r.say) postChat('reviewer', makerKey(job), r.say);
+      if (r.say) postChat(reviewerKey(job), reviewerKey(job) === makerKey(job) ? 'all' : makerKey(job), r.say);
       job.review = { verdict: String(r.verdict).includes('pass') ? 'pass' : 'fail', issues: r.issues || [], text: rtext };
-      if (job.review.verdict === 'pass') { setAgent('reviewer', 'idle', 'ผ่าน ✅'); break; }
-      setAgent('reviewer', 'idle', `ตีกลับ ❌ ${job.review.issues.length} ข้อ`);
+      if (job.review.verdict === 'pass') { setAgent(reviewerKey(job), 'idle', 'ผ่าน ✅'); break; }
+      setAgent(reviewerKey(job), 'idle', `ตีกลับ ❌ ${job.review.issues.length} ข้อ`);
       if (round >= MAX_REVIEW_FIXES) { log(job, 'studio', 'แก้ครบรอบแล้วยังไม่ผ่าน ส่งให้เจ้าของตัดสิน'); break; }
       note = job.review.issues.join('\n');
     }
     job.stage = 'approve'; job.status = 'waiting_approval';
-    setAgent('reviewer', 'waiting', 'รอเจ้าของอนุมัติ ✋');
+    setAgent(reviewerKey(job), 'waiting', 'รอเจ้าของอนุมัติ ✋');
   });
 }
 
@@ -557,7 +597,7 @@ const server = http.createServer(async (req, res) => {
     if (busy) return json(res, 409, { error: 'ทีมกำลังทำงานอยู่' });
     const b = await readBody(req);
     const brief = String(b.brief || '').trim();
-    const kind = b.kind === 'graphic' ? 'graphic' : 'web';
+    const kind = ['graphic', 'code'].includes(b.kind) ? b.kind : 'web';
     let projectPath = String(b.project || '');
     if (b.newProject) {
       const name = String(b.newProject).trim().replace(/[^\w\-ก-๙ .]/g, '').slice(0, 60);
@@ -593,7 +633,7 @@ const server = http.createServer(async (req, res) => {
       runBuildAndReview(job, b.note ? `ความเห็นเพิ่มเติมจากเจ้าของ: ${b.note}` : null);
     } else if (m[2] === 'approve') {
       if (job.status !== 'waiting_approval') return json(res, 400, { error: 'ยังไม่ถึงขั้นอนุมัติ' });
-      setAgent('reviewer', 'idle', '');
+      setAgent(reviewerKey(job), 'idle', '');
       if (b.approved) {
         job.status = 'done'; job.stage = 'done'; log(job, 'owner', 'อนุมัติแล้ว 🎉'); pushJob(job);
         postChat('owner', 'all', 'อนุมัติแล้ว เก่งมากทุกคน 🎉');
