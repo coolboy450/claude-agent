@@ -141,6 +141,8 @@ pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-hei
 .toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
 #canvas { cursor: pointer; }
 select.mini { width: auto; min-height: 36px; padding: 4px 8px; font-size: 14px; }
+.custom-every { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.custom-every input { width: 120px; }
 .moods { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .moods li { font-size: 12px; padding: 4px 12px; border-radius: var(--r-pill); border: 1px solid var(--border); color: var(--muted); }
 .moods li b { color: var(--c, var(--text)); font-weight: 600; }
