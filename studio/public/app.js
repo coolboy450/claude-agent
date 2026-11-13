@@ -1,0 +1,180 @@
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const NAMES = { ui: 'นักออกแบบ UI', graphic: 'นักออกแบบกราฟิก', frontend: 'นักพัฒนา Frontend', reviewer: 'ผู้ตรวจคุณภาพ', owner: 'คุณ', studio: 'สตูดิโอ' };
+  const STATUS = {
+    running: 'ทีมกำลังทำงาน…', waiting_choice: 'รอคุณเลือกแบบร่าง', waiting_approval: 'รอคุณอนุมัติ',
+    done: 'เสร็จแล้ว 🎉', failed: 'เกิดข้อผิดพลาด', paused_limit: 'หยุดชั่วคราว: โควตาหมด', cancelled: 'ยกเลิกแล้ว',
+  };
+  const STAGES = ['draft', 'choose', 'build', 'review', 'approve'];
+  let job = null, picked = null;
+
+  async function api(path, body) {
+    const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'เกิดข้อผิดพลาด');
+    return data;
+  }
+  const fmt = (n) => n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
+  const time = (ms) => new Date(ms).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+
+  // ---------- quota ----------
+  function renderQuota(q) {
+    if (!q) return;
+    const pct = q.budget ? Math.min(100, Math.round(q.used / q.budget * 100)) : 0;
+    $('q-fill').style.width = pct + '%';
+    $('q-bar').setAttribute('aria-valuenow', pct);
+    $('q-bar').classList.toggle('low', !!q.low);
+    $('q-low').hidden = !q.low;
+    const src = q.source === 'manual' ? 'ตั้งเอง' : q.source === 'learned' ? 'เรียนรู้จากรอบก่อน' : 'ยังไม่รู้ จะเรียนรู้เมื่อชนลิมิตครั้งแรก';
+    $('q-text').textContent = `ใช้ไป ${fmt(q.used)} / งบ ${fmt(q.budget)} (${src}) · รอบนี้หมด ${time(q.windowEnds)}`;
+    if (q.source === 'manual' && document.activeElement !== $('q-budget')) $('q-budget').value = q.budget;
+  }
+  $('q-settings-btn').onclick = () => {
+    const open = $('q-settings').hidden;
+    $('q-settings').hidden = !open; $('q-settings-btn').setAttribute('aria-expanded', open);
+  };
+  $('q-settings').onsubmit = async (e) => {
+    e.preventDefault();
+    const v = $('q-budget').value.trim();
+    renderQuota((await api('/api/settings', { budget: v === '' ? null : Number(v) })).quota);
+  };
+  $('q-reset').onclick = async () => renderQuota((await api('/api/settings', { resetUsage: true })).quota);
+
+  // ---------- projects ----------
+  async function loadProjects() {
+    const { projects } = await api('/api/projects');
+    const sel = $('project');
+    sel.innerHTML = '';
+    projects.forEach((p) => sel.add(new Option(p.name, p.path)));
+    sel.add(new Option('+ โปรเจกต์ใหม่…', '__new'));
+  }
+  $('project').onchange = () => { $('new-project').hidden = $('project').value !== '__new'; };
+
+  $('new-job').onsubmit = async (e) => {
+    e.preventDefault();
+    $('new-error').textContent = '';
+    const isNew = $('project').value === '__new';
+    try {
+      $('submit').disabled = true;
+      const { job: j } = await api('/api/jobs', {
+        project: isNew ? '' : $('project').value,
+        newProject: isNew ? $('new-project').value : '',
+        kind: document.querySelector('input[name=kind]:checked').value,
+        brief: $('brief').value,
+      });
+      $('brief').value = ''; setJob(j);
+      if (isNew) loadProjects();
+    } catch (err) { $('new-error').textContent = err.message; }
+    finally { $('submit').disabled = false; }
+  };
+
+  // ---------- job ----------
+  function setJob(j) {
+    job = j && !['done', 'cancelled'].includes(j.status) ? j : (j && j.status === 'done' ? j : null);
+    const active = job && !['done', 'cancelled'].includes(job.status);
+    $('job-card').hidden = !job;
+    $('new-card').hidden = !!active;
+    $('cancel').hidden = !active;
+    renderStepper();
+    if (!job) return;
+    $('job-brief').textContent = job.brief;
+    $('job-meta').textContent = `${job.kind === 'graphic' ? 'กราฟิก' : 'เว็บ / embed'} · ${job.projectPath}`;
+    $('job-status').textContent = STATUS[job.status] || job.status;
+    $('job-error-wrap').hidden = !job.error;
+    $('job-error').textContent = job.error || '';
+    $('resume').hidden = !['paused_limit', 'failed'].includes(job.status);
+
+    // choose
+    const choosing = job.status === 'waiting_choice';
+    $('choose').hidden = !choosing;
+    if (choosing) {
+      const src = `/work/${job.id}/drafts.html`;
+      if ($('draft-frame').dataset.src !== src) { $('draft-frame').src = src; $('draft-frame').dataset.src = src; }
+      $('draft-open').href = src;
+      const box = $('options'); box.innerHTML = ''; picked = null; $('choose-btn').disabled = true;
+      job.options.forEach((o) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'opt'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', 'false');
+        b.innerHTML = `<strong></strong><b></b><span></span>`;
+        b.querySelector('strong').textContent = o.id; b.querySelector('b').textContent = o.title || ''; b.querySelector('span').textContent = o.summary || '';
+        b.onclick = () => { picked = o.id; box.querySelectorAll('.opt').forEach((x) => x.setAttribute('aria-checked', x === b)); $('choose-btn').disabled = false; };
+        box.append(b);
+      });
+    }
+    // approve
+    const approving = job.status === 'waiting_approval';
+    $('approve').hidden = !approving;
+    if (approving) {
+      const rv = job.review || {};
+      $('review-verdict').textContent = rv.verdict === 'pass' ? 'ผู้ตรวจ: ผ่าน ✅' : 'ผู้ตรวจ: ยังไม่ผ่าน ⚠️ (แก้ครบรอบแล้ว ให้คุณตัดสิน)';
+      $('review-verdict').className = 'verdict ' + (rv.verdict === 'pass' ? 'pass' : 'fail');
+      $('review-issues').innerHTML = '';
+      (rv.issues || []).forEach((i) => { const li = document.createElement('li'); li.textContent = i; $('review-issues').append(li); });
+      $('maker-summary').textContent = job.makerSummary || '';
+      $('gallery').innerHTML = '';
+      if (job.kind === 'graphic') api(`/api/jobs/${job.id}/files`).then(({ files }) => {
+        files.filter((f) => /\.(png|svg|jpe?g|webp|gif)$/i.test(f)).forEach((f) => {
+          const a = document.createElement('a'); a.href = `/work/${job.id}/${f}`; a.target = '_blank'; a.rel = 'noopener';
+          const img = document.createElement('img'); img.src = a.href; img.alt = f.split('/').pop(); a.append(img); $('gallery').append(a);
+        });
+      });
+    }
+  }
+  function renderStepper() {
+    const cur = job ? job.stage : null;
+    const idx = STAGES.indexOf(cur);
+    document.querySelectorAll('#stepper li').forEach((li, i) => {
+      li.classList.toggle('now', i === idx && job && job.status !== 'done');
+      li.classList.toggle('done', job && (i < idx || job.status === 'done'));
+    });
+  }
+  $('choose-btn').onclick = async () => {
+    if (!picked) return;
+    try { setJob((await api(`/api/jobs/${job.id}/choose`, { option: picked, note: $('choose-note').value })).job); $('choose-note').value = ''; }
+    catch (e) { alert(e.message); }
+  };
+  $('approve-yes').onclick = async () => { try { setJob((await api(`/api/jobs/${job.id}/approve`, { approved: true })).job); } catch (e) { alert(e.message); } };
+  $('approve-no').onclick = async () => {
+    const note = $('approve-note').value.trim();
+    if (!note) { $('approve-note').focus(); return; }
+    try { setJob((await api(`/api/jobs/${job.id}/approve`, { approved: false, note })).job); $('approve-note').value = ''; } catch (e) { alert(e.message); }
+  };
+  $('resume').onclick = async () => { try { setJob((await api(`/api/jobs/${job.id}/resume`, {})).job); } catch (e) { alert(e.message); } };
+  $('cancel').onclick = async () => {
+    if (!confirm('ยกเลิกงานนี้? ไฟล์ที่ทีมทำไปแล้วจะยังอยู่')) return;
+    try { await api(`/api/jobs/${job.id}/cancel`, {}); setJob(null); } catch (e) { alert(e.message); }
+  };
+
+  // ---------- log ----------
+  function addLog(who, text) {
+    const li = document.createElement('li'); li.className = who;
+    const b = document.createElement('b'); b.textContent = (NAMES[who] || who) + ': ';
+    li.append(b, document.createTextNode(text));
+    $('log').prepend(li);
+    while ($('log').children.length > 200) $('log').lastChild.remove();
+  }
+
+  // ---------- live events ----------
+  function connect() {
+    const es = new EventSource('/api/events');
+    es.onopen = () => { $('conn').textContent = 'เชื่อมต่อแล้ว'; $('conn').className = 'conn ok'; };
+    es.onerror = () => { $('conn').textContent = 'ขาดการเชื่อมต่อ — เซิร์ฟเวอร์ยังเปิดอยู่ไหม?'; $('conn').className = 'conn bad'; };
+    es.onmessage = (m) => {
+      const e = JSON.parse(m.data);
+      if (e.type === 'hello') {
+        for (const k in e.agents) Office.set(k, e.agents[k].state, e.agents[k].bubble);
+        renderQuota(e.quota);
+        $('log').innerHTML = '';
+        if (e.job) { e.job.history.forEach((h) => addLog(h.who, h.text)); setJob(e.job); } else setJob(null);
+      }
+      if (e.type === 'agent') Office.set(e.key, e.state, e.bubble);
+      if (e.type === 'quota') renderQuota(e.quota);
+      if (e.type === 'job') setJob(e.job);
+      if (e.type === 'log' && (!job || e.jobId === job.id)) addLog(e.who, e.text);
+    };
+  }
+
+  loadProjects().catch((e) => { $('new-error').textContent = e.message; });
+  connect();
+})();

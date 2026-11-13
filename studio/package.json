@@ -1,0 +1,13 @@
+{
+  "name": "noob-dev-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local pixel office for the noob_dev Design team, powered by Claude Code CLI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

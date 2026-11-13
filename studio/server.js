@@ -1,0 +1,432 @@
+// noob_dev Studio — local pixel-office for the noob_dev Design team.
+// Runs on your machine only. Every agent turn is a headless Claude Code CLI run
+// (`claude -p --agent ...`) using your own Claude login, so no API key is needed.
+// No npm dependencies: Node 18+ built-ins only.
+
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
+
+// ---------- config ----------
+const PORT = Number(process.env.STUDIO_PORT || 4321);
+const HOST = '127.0.0.1'; // local only
+const PROJECTS_ROOT = process.env.STUDIO_PROJECTS_ROOT || 'E:\\';
+const HOME_CLAUDE = path.join(os.homedir(), '.claude');
+const BRAND_DIR = path.join(HOME_CLAUDE, 'noob_dev');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const DATA_DIR = path.join(__dirname, 'data');
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
+
+const WINDOW_MS = 5 * 60 * 60 * 1000; // Pro usage window (~5h)
+const LOW_TOKENS = 200000;            // below this, every agent drops to Sonnet
+const MAX_REVIEW_FIXES = 2;           // reviewer bounce-backs before it goes to the owner anyway
+
+const AGENTS = {
+  ui:       { name: 'noob-ui-designer',      label: 'นักออกแบบ UI',       model: 'opus' },
+  graphic:  { name: 'noob-graphic-designer', label: 'นักออกแบบกราฟิก',   model: 'opus' },
+  frontend: { name: 'noob-frontend-dev',     label: 'นักพัฒนา Frontend', model: 'sonnet' },
+  reviewer: { name: 'noob-brand-reviewer',   label: 'ผู้ตรวจคุณภาพ',      model: 'sonnet' },
+};
+
+// ---------- claude binary ----------
+function findClaude() {
+  if (process.env.CLAUDE_BIN) return { cmd: process.env.CLAUDE_BIN, shell: false };
+  const appdata = process.env.APPDATA || '';
+  const exe = path.join(appdata, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+  if (appdata && fs.existsSync(exe)) return { cmd: exe, shell: false };
+  const local = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
+  if (fs.existsSync(local)) return { cmd: local, shell: false };
+  return { cmd: 'claude', shell: process.platform === 'win32' };
+}
+const CLAUDE = findClaude();
+
+// ---------- state ----------
+fs.mkdirSync(DATA_DIR, { recursive: true });
+let state = {
+  usage: { windowStart: null, used: 0 },
+  budget: { value: null, source: null }, // source: 'learned' | 'manual'
+  jobs: [],
+};
+try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
+for (const j of state.jobs) {
+  if (j.status === 'running') { j.status = 'failed'; j.error = 'เซิร์ฟเวอร์ถูกปิดระหว่างทำงาน'; }
+}
+function save() { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+
+const agentStatus = {};
+for (const k of Object.keys(AGENTS)) agentStatus[k] = { state: 'idle', bubble: '' };
+
+// ---------- SSE ----------
+const clients = new Set();
+function broadcast(evt) {
+  const data = `data: ${JSON.stringify(evt)}\n\n`;
+  for (const res of clients) res.write(data);
+}
+function setAgent(key, st, bubble) {
+  agentStatus[key] = { state: st, bubble: bubble ?? agentStatus[key].bubble };
+  broadcast({ type: 'agent', key, ...agentStatus[key] });
+}
+function publicJob(j) { return j && { ...j, history: j.history.slice(-40) }; }
+function pushJob(j) { save(); broadcast({ type: 'job', job: publicJob(j) }); }
+function log(j, who, text) {
+  j.history.push({ t: Date.now(), who, text });
+  broadcast({ type: 'log', jobId: j.id, who, text });
+}
+
+// ---------- usage / budget ----------
+function rollWindow() {
+  const now = Date.now();
+  if (!state.usage.windowStart || now - state.usage.windowStart > WINDOW_MS) {
+    state.usage = { windowStart: now, used: 0 };
+  }
+}
+function quota() {
+  rollWindow();
+  const { value, source } = state.budget;
+  const remaining = value == null ? null : Math.max(0, value - state.usage.used);
+  return {
+    used: state.usage.used,
+    windowStart: state.usage.windowStart,
+    windowEnds: state.usage.windowStart + WINDOW_MS,
+    budget: value, source, remaining,
+    low: remaining != null && remaining < LOW_TOKENS,
+  };
+}
+function addUsage(u) {
+  if (!u) return;
+  rollWindow();
+  // cache reads are far cheaper against limits, so they count at 10%
+  const t = (u.input_tokens || 0) + (u.output_tokens || 0) +
+    (u.cache_creation_input_tokens || 0) + Math.round((u.cache_read_input_tokens || 0) * 0.1);
+  state.usage.used += t;
+  save();
+  broadcast({ type: 'quota', quota: quota() });
+}
+function modelFor(key) { return quota().low ? 'sonnet' : AGENTS[key].model; }
+
+// ---------- running an agent ----------
+class LimitError extends Error {}
+const LIMIT_RE = /usage limit|rate limit|limit reached|limit will reset|hit your limit|5-hour limit/i;
+
+function short(s, n = 90) { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+function describeTool(c) {
+  const i = c.input || {};
+  const f = i.file_path || i.path || i.pattern || '';
+  const base = f ? path.basename(String(f)) : '';
+  const verb = { Read: 'อ่าน', Write: 'เขียน', Edit: 'แก้', Glob: 'ค้นไฟล์', Grep: 'ค้นข้อความ', Bash: 'รันคำสั่ง' }[c.name] || c.name;
+  return `${verb} ${base || short(i.command, 40) || ''}`.trim();
+}
+
+function runAgent(job, key, prompt) {
+  return new Promise((resolve, reject) => {
+    const model = modelFor(key);
+    const args = ['-p', '--agent', AGENTS[key].name, '--model', model,
+      '--output-format', 'stream-json', '--verbose',
+      '--permission-mode', 'acceptEdits',
+      '--add-dir', BRAND_DIR, '--add-dir', job.workDir];
+    setAgent(key, 'working', `เริ่มงาน (${model})`);
+    log(job, key, `เริ่มทำงานด้วยโมเดล ${model}`);
+
+    const child = spawn(CLAUDE.cmd, args, { cwd: job.projectPath, shell: CLAUDE.shell, windowsHide: true, env: process.env });
+    job.pid = child.pid;
+    let buf = '', result = null, lastText = '', stderr = '';
+
+    child.stdout.on('data', (d) => {
+      buf += d.toString('utf8');
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
+          for (const c of ev.message.content) {
+            if (c.type === 'text' && c.text.trim()) { lastText = c.text; setAgent(key, 'working', short(c.text)); }
+            if (c.type === 'tool_use') { const d2 = describeTool(c); setAgent(key, 'working', '🔧 ' + d2); log(job, key, d2); }
+          }
+        } else if (ev.type === 'result') {
+          result = ev;
+        }
+      }
+    });
+    child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+    child.on('error', (e) => { setAgent(key, 'idle', ''); reject(new Error('เรียก Claude CLI ไม่ได้: ' + e.message)); });
+    child.on('close', (code) => {
+      job.pid = null;
+      if (result) addUsage(result.usage);
+      const text = (result && result.result) || lastText || '';
+      const errText = `${result && result.is_error ? text : ''} ${stderr}`;
+      if (LIMIT_RE.test(errText) || (result && result.is_error && LIMIT_RE.test(text))) {
+        setAgent(key, 'idle', 'โควตาหมด 😴');
+        return reject(new LimitError(short(text || stderr, 200)));
+      }
+      if (!result || result.is_error || code !== 0) {
+        setAgent(key, 'idle', '');
+        return reject(new Error(short(text || stderr || `CLI จบด้วยรหัส ${code}`, 300)));
+      }
+      setAgent(key, 'idle', 'เสร็จแล้ว ✓');
+      log(job, key, short(text, 400));
+      resolve(text);
+    });
+    child.stdin.write(prompt, 'utf8');
+    child.stdin.end();
+  });
+}
+
+function extractJson(text) {
+  const blocks = [...String(text).matchAll(/```json\s*([\s\S]*?)```/g)].map((m) => m[1]);
+  const cands = blocks.length ? blocks.reverse() : [String(text).slice(String(text).lastIndexOf('{'))];
+  for (const c of cands) { try { return JSON.parse(c.trim()); } catch {} }
+  return null;
+}
+
+// ---------- prompts ----------
+const COMMON = (job) =>
+  `งานจากเจ้าของ: ${job.brief}\nโปรเจกต์: ${job.projectPath}\nโฟลเดอร์งานนี้ของสตูดิโอ: ${job.workDir}\nคู่มือแบรนด์: ${path.join(BRAND_DIR, 'brand-guide.md')}\nตอบเป็นภาษาไทย สั้น กระชับ\n`;
+
+function draftPrompt(job) {
+  const what = job.kind === 'graphic' ? 'กราฟิก (แสดงแต่ละแบบในขนาดจริงตามคู่มือหมวด 7)' : 'หน้าเว็บ/embed';
+  return `${COMMON(job)}
+ทำแบบร่าง${what} 2–3 ทิศทางตามบทบาทของคุณ
+บันทึกทุกแบบไว้ในไฟล์เดียว: ${path.join(job.workDir, 'drafts.html')} (เปิดดูได้ทันที มีหัวข้อ "แบบ A", "แบบ B", ...)
+ห้ามแก้ไฟล์อื่นในโปรเจกต์
+จบคำตอบด้วยบล็อกนี้ (ห้ามมีข้อความหลังบล็อก):
+\`\`\`json
+{"options":[{"id":"A","title":"ชื่อสั้น","summary":"1–2 บรรทัด"}]}
+\`\`\``;
+}
+
+function buildPrompt(job, fixNote) {
+  const opt = (job.options || []).find((o) => o.id === job.chosen) || { id: job.chosen, title: '' };
+  const fix = fixNote ? `\n\nรอบแก้ไข — แก้ตามนี้:\n${fixNote}` : '';
+  if (job.kind === 'graphic') {
+    return `${COMMON(job)}
+เจ้าของเลือก "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}
+ทำไฟล์จริงทุกขนาดที่ต้องใช้ (SVG และ PNG ถ้าทำได้) ไว้ใน ${path.join(job.workDir, 'final')}
+สรุปท้ายคำตอบ: รายการไฟล์ + ใช้ที่ไหน${fix}`;
+  }
+  return `${COMMON(job)}
+เจ้าของเลือก "แบบ ${opt.id} ${opt.title}" จาก ${path.join(job.workDir, 'drafts.html')}
+นำแบบนี้ไปเขียนเป็นโค้ดจริงในโปรเจกต์ ${job.projectPath} (ถ้าเป็นโปรเจกต์ใหม่หรือไม่มีหน้าที่เกี่ยวข้อง ให้สร้างไฟล์ใหม่ในโปรเจกต์)
+ห้าม commit/push
+สรุปท้ายคำตอบ: รายการไฟล์ที่สร้าง/แก้ + วิธีเปิดดู${fix}`;
+}
+
+function reviewPrompt(job, makerSummary) {
+  return `${COMMON(job)}
+ตรวจงานชิ้นนี้ตาม Checklist หมวด 8 ทุกข้อ
+สรุปจากผู้ทำงาน:
+${makerSummary}
+ไฟล์งานอยู่ใน ${job.kind === 'graphic' ? path.join(job.workDir, 'final') : job.projectPath + ' (ดูเฉพาะไฟล์ที่ระบุในสรุป)'}
+ห้ามแก้ไฟล์
+จบคำตอบด้วยบล็อกนี้ (ห้ามมีข้อความหลังบล็อก):
+\`\`\`json
+{"verdict":"pass หรือ fail","issues":["ไฟล์:บรรทัด → ผิดอะไร → ควรเป็นอะไร"]}
+\`\`\``;
+}
+
+// ---------- pipeline ----------
+let busy = false;
+function makerKey(job) { return job.kind === 'graphic' ? 'graphic' : 'frontend'; }
+function designerKey(job) { return job.kind === 'graphic' ? 'graphic' : 'ui'; }
+
+async function stage(job, fn) {
+  busy = true; job.status = 'running'; job.error = null; pushJob(job);
+  try { await fn(); }
+  catch (e) {
+    if (e instanceof LimitError) {
+      if (state.budget.source !== 'manual') {
+        state.budget = { value: state.usage.used, source: 'learned' };
+        broadcast({ type: 'quota', quota: quota() });
+      }
+      job.status = 'paused_limit';
+      job.error = 'โควตา Pro รอบนี้หมดแล้ว สตูดิโอจำตัวเลขไว้เป็นงบรอบหน้า กด "ทำต่อ" หลังโควตารีเซ็ต';
+    } else {
+      job.status = 'failed'; job.error = e.message;
+    }
+    log(job, 'studio', job.error);
+  } finally {
+    busy = false; pushJob(job);
+    for (const k of Object.keys(AGENTS)) if (agentStatus[k].state === 'working') setAgent(k, 'idle', '');
+  }
+}
+
+function runDrafts(job) {
+  return stage(job, async () => {
+    job.stage = 'draft';
+    const text = await runAgent(job, designerKey(job), draftPrompt(job));
+    const j = extractJson(text);
+    job.options = (j && Array.isArray(j.options) && j.options.length) ? j.options
+      : [{ id: 'A', title: 'แบบ A', summary: '' }, { id: 'B', title: 'แบบ B', summary: '' }];
+    job.stage = 'choose'; job.status = 'waiting_choice';
+    setAgent(designerKey(job), 'waiting', 'รอเจ้าของเลือกแบบ ✋');
+  });
+}
+
+function runBuildAndReview(job, fixNote) {
+  return stage(job, async () => {
+    let note = fixNote || null;
+    for (let round = 0; ; round++) {
+      job.stage = 'build';
+      job.makerSummary = await runAgent(job, makerKey(job), buildPrompt(job, note));
+      job.stage = 'review';
+      const rtext = await runAgent(job, 'reviewer', reviewPrompt(job, job.makerSummary));
+      const r = extractJson(rtext) || { verdict: 'fail', issues: ['ผู้ตรวจไม่ได้ส่งผลในรูปแบบที่อ่านได้'] };
+      job.review = { verdict: String(r.verdict).includes('pass') ? 'pass' : 'fail', issues: r.issues || [], text: rtext };
+      if (job.review.verdict === 'pass') { setAgent('reviewer', 'idle', 'ผ่าน ✅'); break; }
+      setAgent('reviewer', 'idle', `ตีกลับ ❌ ${job.review.issues.length} ข้อ`);
+      if (round >= MAX_REVIEW_FIXES) { log(job, 'studio', 'แก้ครบรอบแล้วยังไม่ผ่าน ส่งให้เจ้าของตัดสิน'); break; }
+      note = job.review.issues.join('\n');
+    }
+    job.stage = 'approve'; job.status = 'waiting_approval';
+    setAgent('reviewer', 'waiting', 'รอเจ้าของอนุมัติ ✋');
+  });
+}
+
+// ---------- helpers ----------
+function listProjects() {
+  try {
+    return fs.readdirSync(PROJECTS_ROOT, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !/^[$.]/.test(d.name) && !/^(System Volume Information|RECYCLER|Recovery)$/i.test(d.name))
+      .map((d) => ({ name: d.name, path: path.join(PROJECTS_ROOT, d.name) }));
+  } catch { return []; }
+}
+function finalFiles(job) {
+  const dir = path.join(job.workDir, 'final');
+  try { return fs.readdirSync(dir).filter((f) => !fs.statSync(path.join(dir, f)).isDirectory()).map((f) => 'final/' + f); } catch { return []; }
+}
+function readBody(req) {
+  return new Promise((resolve) => {
+    let b = ''; req.on('data', (d) => { b += d; if (b.length > 1e6) req.destroy(); });
+    req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } });
+  });
+}
+function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); }
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.json': 'application/json', '.woff2': 'font/woff2' };
+function sendFile(res, file) {
+  fs.readFile(file, (err, data) => {
+    if (err) { res.writeHead(404); return res.end('not found'); }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+    res.end(data);
+  });
+}
+function safeJoin(base, rel) {
+  const p = path.resolve(base, '.' + path.sep + rel);
+  return p === base || p.startsWith(base + path.sep) ? p : null;
+}
+function findJob(id) { return state.jobs.find((j) => j.id === id); }
+function activeJob() { return [...state.jobs].reverse().find((j) => !['done', 'cancelled'].includes(j.status)) || null; }
+
+// ---------- http ----------
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const p = url.pathname;
+  // Same-origin guard for state-changing requests (blocks other websites from driving the studio)
+  if (req.method === 'POST') {
+    const origin = req.headers.origin;
+    if (origin && origin !== `http://${HOST}:${PORT}` && origin !== `http://localhost:${PORT}`) return json(res, 403, { error: 'forbidden' });
+  }
+
+  if (p === '/api/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), labels: AGENTS })}\n\n`);
+    clients.add(res); req.on('close', () => clients.delete(res));
+    return;
+  }
+  if (p === '/api/projects') return json(res, 200, { root: PROJECTS_ROOT, projects: listProjects() });
+  if (p === '/api/state') return json(res, 200, { agents: agentStatus, quota: quota(), job: publicJob(activeJob()), busy });
+
+  if (p === '/api/jobs' && req.method === 'POST') {
+    if (busy) return json(res, 409, { error: 'ทีมกำลังทำงานอยู่' });
+    const b = await readBody(req);
+    const brief = String(b.brief || '').trim();
+    const kind = b.kind === 'graphic' ? 'graphic' : 'web';
+    let projectPath = String(b.project || '');
+    if (b.newProject) {
+      const name = String(b.newProject).trim().replace(/[^\w\-ก-๙ .]/g, '').slice(0, 60);
+      if (!name) return json(res, 400, { error: 'ตั้งชื่อโปรเจกต์ใหม่ก่อน' });
+      projectPath = path.join(PROJECTS_ROOT, name);
+      fs.mkdirSync(projectPath, { recursive: true });
+    }
+    if (!brief) return json(res, 400, { error: 'พิมพ์งานที่ต้องการก่อน' });
+    if (!listProjects().some((x) => x.path === projectPath)) return json(res, 400, { error: 'ไม่พบโปรเจกต์นี้' });
+    const old = activeJob(); if (old) { old.status = 'cancelled'; }
+    const id = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) + '-' + crypto.randomBytes(2).toString('hex');
+    const workDir = path.join(projectPath, '.noob-studio', id);
+    fs.mkdirSync(workDir, { recursive: true });
+    const job = { id, kind, brief, projectPath, workDir, status: 'running', stage: 'draft', options: [], chosen: null, review: null, makerSummary: '', history: [], createdAt: Date.now() };
+    state.jobs.push(job); state.jobs = state.jobs.slice(-30);
+    log(job, 'studio', `รับงานใหม่: ${brief}`);
+    runDrafts(job);
+    return json(res, 200, { job: publicJob(job) });
+  }
+
+  const m = p.match(/^\/api\/jobs\/([\w-]+)\/(choose|approve|resume|cancel)$/);
+  if (m && req.method === 'POST') {
+    const job = findJob(m[1]); if (!job) return json(res, 404, { error: 'ไม่พบงาน' });
+    if (busy && m[2] !== 'cancel') return json(res, 409, { error: 'ทีมกำลังทำงานอยู่' });
+    const b = await readBody(req);
+    if (m[2] === 'choose') {
+      if (job.status !== 'waiting_choice') return json(res, 400, { error: 'ยังไม่ถึงขั้นเลือกแบบ' });
+      job.chosen = String(b.option || '');
+      if (!job.options.some((o) => o.id === job.chosen)) return json(res, 400, { error: 'ไม่มีแบบนี้' });
+      log(job, 'owner', `เลือกแบบ ${job.chosen}${b.note ? ' — ' + b.note : ''}`);
+      setAgent(designerKey(job), 'idle', '');
+      runBuildAndReview(job, b.note ? `ความเห็นเพิ่มเติมจากเจ้าของ: ${b.note}` : null);
+    } else if (m[2] === 'approve') {
+      if (job.status !== 'waiting_approval') return json(res, 400, { error: 'ยังไม่ถึงขั้นอนุมัติ' });
+      setAgent('reviewer', 'idle', '');
+      if (b.approved) {
+        job.status = 'done'; job.stage = 'done'; log(job, 'owner', 'อนุมัติแล้ว 🎉'); pushJob(job);
+        for (const k of Object.keys(AGENTS)) setAgent(k, 'idle', '🎉');
+      } else {
+        const note = String(b.note || '').trim() || 'เจ้าของยังไม่พอใจ ลองปรับให้ดีขึ้น';
+        log(job, 'owner', `ขอแก้: ${note}`);
+        runBuildAndReview(job, `เจ้าของขอแก้: ${note}`);
+      }
+    } else if (m[2] === 'resume') {
+      if (!['paused_limit', 'failed'].includes(job.status)) return json(res, 400, { error: 'งานนี้ไม่ได้หยุดค้าง' });
+      if (!job.chosen) runDrafts(job); else runBuildAndReview(job, job.review && job.review.verdict === 'fail' ? job.review.issues.join('\n') : null);
+    } else if (m[2] === 'cancel') {
+      if (job.pid) { try { process.kill(job.pid); } catch {} }
+      job.status = 'cancelled'; log(job, 'owner', 'ยกเลิกงาน'); pushJob(job);
+      for (const k of Object.keys(AGENTS)) setAgent(k, 'idle', '');
+    }
+    return json(res, 200, { job: publicJob(job) });
+  }
+
+  const f = p.match(/^\/api\/jobs\/([\w-]+)\/files$/);
+  if (f) { const job = findJob(f[1]); return json(res, job ? 200 : 404, { files: job ? finalFiles(job) : [] }); }
+
+  if (p === '/api/settings' && req.method === 'POST') {
+    const b = await readBody(req);
+    if (b.budget === null || b.budget === '') state.budget = { value: null, source: null };
+    else if (Number(b.budget) > 0) state.budget = { value: Math.round(Number(b.budget)), source: 'manual' };
+    if (b.resetUsage) state.usage = { windowStart: Date.now(), used: 0 };
+    save(); broadcast({ type: 'quota', quota: quota() });
+    return json(res, 200, { quota: quota() });
+  }
+
+  const w = p.match(/^\/work\/([\w-]+)\/(.+)$/);
+  if (w) {
+    const job = findJob(w[1]); if (!job) { res.writeHead(404); return res.end(); }
+    const file = safeJoin(job.workDir, decodeURIComponent(w[2]));
+    if (!file) { res.writeHead(403); return res.end(); }
+    return sendFile(res, file);
+  }
+
+  const file = safeJoin(PUBLIC_DIR, p === '/' ? 'index.html' : decodeURIComponent(p.slice(1)));
+  if (!file) { res.writeHead(403); return res.end(); }
+  return sendFile(res, file);
+});
+
+server.listen(PORT, HOST, () => {
+  const v = spawnSync(CLAUDE.cmd, ['--version'], { shell: CLAUDE.shell, encoding: 'utf8' });
+  console.log(`\n  noob_dev Studio → http://localhost:${PORT}`);
+  console.log(`  Claude CLI: ${v.status === 0 ? v.stdout.trim() : 'ไม่พบ! ติดตั้ง: npm install -g @anthropic-ai/claude-code'}`);
+  console.log(`  โปรเจกต์จาก: ${PROJECTS_ROOT}\n`);
+});

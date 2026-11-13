@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>noob_dev Studio</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Thai:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="logo" href="/">noob<span>_</span>dev <small>studio</small></a>
+    <div class="conn" id="conn" aria-live="polite">กำลังเชื่อมต่อ…</div>
+  </header>
+
+  <main class="layout">
+    <section class="office-wrap" aria-label="ออฟฟิศของทีม">
+      <div class="office" id="office">
+        <canvas id="canvas" width="320" height="200" aria-hidden="true"></canvas>
+        <div class="sign" aria-hidden="true">noob<span>_</span>dev</div>
+        <!-- bubbles + name plates are injected by office.js -->
+      </div>
+      <ol class="stepper" id="stepper" aria-label="ขั้นตอนงาน">
+        <li data-s="draft">แบบร่าง</li>
+        <li data-s="choose">✋ เลือกแบบ</li>
+        <li data-s="build">ลงมือ</li>
+        <li data-s="review">ตรวจ</li>
+        <li data-s="approve">✋ อนุมัติ</li>
+      </ol>
+      <section class="card log-card" aria-labelledby="log-title">
+        <h2 id="log-title" class="label">&gt; log</h2>
+        <ul class="log" id="log"></ul>
+      </section>
+    </section>
+
+    <aside class="panel">
+      <section class="card" aria-labelledby="q-title">
+        <div class="row-between">
+          <h2 id="q-title" class="label">&gt; โควตา Pro</h2>
+          <button class="link" id="q-settings-btn" aria-expanded="false" aria-controls="q-settings">ตั้งค่า</button>
+        </div>
+        <div class="bar" role="progressbar" id="q-bar" aria-valuemin="0" aria-valuemax="100"><i id="q-fill"></i></div>
+        <p class="muted small" id="q-text">—</p>
+        <p class="badge-low" id="q-low" hidden>โหมดประหยัด: ทุกตำแหน่งใช้ Sonnet</p>
+        <form id="q-settings" class="stack" hidden>
+          <label class="small" for="q-budget">งบโทเค็นต่อรอบ 5 ชม. (เว้นว่าง = ให้สตูดิโอเรียนรู้เอง)</label>
+          <input id="q-budget" type="number" min="1" step="1000" inputmode="numeric" placeholder="เช่น 1500000">
+          <div class="row">
+            <button class="btn btn-primary" type="submit">บันทึก</button>
+            <button class="btn btn-ghost" type="button" id="q-reset">เริ่มนับรอบใหม่</button>
+          </div>
+          <p class="muted small">สตูดิโอนับเฉพาะที่ตัวเองใช้ ถ้าคุยกับ Claude ที่อื่นด้วย ให้ตั้งงบเผื่อไว้</p>
+        </form>
+      </section>
+
+      <section class="card" id="new-card" aria-labelledby="new-title">
+        <h2 id="new-title" class="label">&gt; สั่งงานใหม่</h2>
+        <form id="new-job" class="stack">
+          <label for="project">โปรเจกต์</label>
+          <select id="project" required></select>
+          <input id="new-project" type="text" placeholder="ชื่อโฟลเดอร์โปรเจกต์ใหม่" hidden>
+          <fieldset class="seg">
+            <legend>ประเภทงาน</legend>
+            <label><input type="radio" name="kind" value="web" checked> เว็บ / embed</label>
+            <label><input type="radio" name="kind" value="graphic"> กราฟิก</label>
+          </fieldset>
+          <label for="brief">อยากให้ทีมทำอะไร</label>
+          <textarea id="brief" rows="4" required placeholder="เช่น ออกแบบหน้า about ของ THAISearch ใหม่ให้ตรงแบรนด์"></textarea>
+          <button class="btn btn-primary" type="submit" id="submit">สั่งงาน</button>
+          <p class="error" id="new-error" role="alert"></p>
+        </form>
+      </section>
+
+      <section class="card" id="job-card" hidden aria-labelledby="job-title">
+        <div class="row-between">
+          <h2 id="job-title" class="label">&gt; งานปัจจุบัน</h2>
+          <button class="link danger" id="cancel">ยกเลิกงาน</button>
+        </div>
+        <p id="job-brief" class="brief"></p>
+        <p class="muted small" id="job-meta"></p>
+        <p class="status" id="job-status" aria-live="polite"></p>
+        <div id="job-error-wrap" hidden>
+          <p class="error" id="job-error"></p>
+          <button class="btn btn-ghost" id="resume">ทำต่อ</button>
+        </div>
+
+        <div id="choose" hidden class="stack">
+          <h3>✋ เลือกแบบร่าง</h3>
+          <div class="preview"><iframe id="draft-frame" title="แบบร่าง" loading="lazy"></iframe></div>
+          <a class="link small" id="draft-open" target="_blank" rel="noopener">เปิดแบบร่างเต็มจอ ↗</a>
+          <div class="options" id="options" role="radiogroup" aria-label="ตัวเลือกแบบร่าง"></div>
+          <label for="choose-note" class="small">ความเห็นเพิ่มเติม (ไม่บังคับ)</label>
+          <input id="choose-note" type="text" placeholder="เช่น ชอบแบบ A แต่อยากได้สีแบบ B">
+          <button class="btn btn-primary" id="choose-btn" disabled>ใช้แบบนี้</button>
+        </div>
+
+        <div id="approve" hidden class="stack">
+          <h3>✋ ตรวจผลลัพธ์สุดท้าย</h3>
+          <p id="review-verdict" class="verdict"></p>
+          <ul id="review-issues" class="issues"></ul>
+          <div class="gallery" id="gallery"></div>
+          <details><summary>สรุปจากผู้ทำงาน</summary><pre id="maker-summary"></pre></details>
+          <label for="approve-note" class="small">ถ้าจะขอแก้ บอกสิ่งที่อยากเปลี่ยน</label>
+          <textarea id="approve-note" rows="2"></textarea>
+          <div class="row">
+            <button class="btn btn-primary" id="approve-yes">อนุมัติ</button>
+            <button class="btn btn-ghost" id="approve-no">ขอแก้</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <script src="office.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
