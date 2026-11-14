@@ -244,6 +244,37 @@
     }
   }
 
+  // ---------- tabs: office / stock-bot monitor ----------
+  // Monitor lives on the bot dashboard (port 8000) of the same host, unless the server says otherwise.
+  let monitorUrl = `${location.protocol}//${location.hostname}:8000/monitor`;
+  function showTab(name) {
+    const bot = name === 'bot';
+    $('tab-office').setAttribute('aria-selected', !bot);
+    $('tab-bot').setAttribute('aria-selected', bot);
+    $('view-office').hidden = bot;
+    $('view-bot').hidden = !bot;
+    if (bot && $('bot-frame').dataset.src !== monitorUrl) {
+      $('bot-frame').dataset.src = monitorUrl;
+      $('bot-frame').src = monitorUrl;
+      $('bot-fail').hidden = true;
+      // a cross-origin frame gives no error event; just check the dashboard answers at all
+      fetch(monitorUrl, { mode: 'no-cors' }).catch(() => { $('bot-fail').hidden = false; });
+    }
+    $('bot-open').href = $('bot-fail-open').href = monitorUrl;
+    try { localStorage.setItem('studio-tab', name); } catch {}
+  }
+  $('tab-office').onclick = () => showTab('office');
+  $('tab-bot').onclick = () => showTab('bot');
+  document.querySelector('.tabs').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      const next = $('tab-office').getAttribute('aria-selected') === 'true' ? 'bot' : 'office';
+      showTab(next); $(next === 'bot' ? 'tab-bot' : 'tab-office').focus();
+    }
+  });
+  let savedTab = 'office';
+  try { savedTab = localStorage.getItem('studio-tab') || 'office'; } catch {}
+  showTab(savedTab);
+
   // ---------- live events ----------
   function connect() {
     const es = new EventSource('/api/events');
@@ -252,6 +283,11 @@
     es.onmessage = (m) => {
       const e = JSON.parse(m.data);
       if (e.type === 'hello') {
+        if (e.monitorUrl && e.monitorUrl !== monitorUrl) {
+          monitorUrl = e.monitorUrl;
+          if (!$('view-bot').hidden) { $('bot-frame').dataset.src = ''; showTab('bot'); }
+          $('bot-open').href = $('bot-fail-open').href = monitorUrl;
+        }
         setPersonas(e.personas);
         setBanter(e.banter, e.banterEvery);
         renderMoods(e.moods || {});

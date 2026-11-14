@@ -640,7 +640,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter, banterEvery: state.banterEvery, moods: state.moods })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter, banterEvery: state.banterEvery, moods: state.moods, monitorUrl: process.env.STUDIO_MONITOR_URL || null })}\n\n`);
     clients.add(res); req.on('close', () => clients.delete(res));
     return;
   }
