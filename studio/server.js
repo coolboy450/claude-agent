@@ -17,6 +17,8 @@ const PORT = Number(process.env.STUDIO_PORT || 4321);
 // so only a private network (e.g. Tailscale) can reach it — see deploy/install.sh.
 const HOST = process.env.STUDIO_HOST || '127.0.0.1';
 const PROJECTS_ROOT = process.env.STUDIO_PROJECTS_ROOT || 'E:\\';
+// Stock-bot dashboard to proxy /monitor from (empty string turns the proxy off).
+const BOT_URL = process.env.STUDIO_BOT_URL ?? 'http://127.0.0.1:8000';
 const HOME_CLAUDE = path.join(os.homedir(), '.claude');
 const BRAND_DIR = path.join(HOME_CLAUDE, 'noob_dev');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -640,7 +642,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter, banterEvery: state.banterEvery, moods: state.moods })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'hello', agents: agentStatus, quota: quota(), job: publicJob(activeJob()), personas: PUBLIC_PERSONAS, chat: state.chat.slice(-80), banter: state.banter, banterEvery: state.banterEvery, moods: state.moods, monitorUrl: process.env.STUDIO_MONITOR_URL || null })}\n\n`);
     clients.add(res); req.on('close', () => clients.delete(res));
     return;
   }
@@ -732,6 +734,18 @@ const server = http.createServer(async (req, res) => {
     if (b.resetUsage) state.usage = { windowStart: Date.now(), used: 0 };
     save(); broadcast({ type: 'quota', quota: quota() });
     return json(res, 200, { quota: quota() });
+  }
+
+  // Stock-bot monitor, proxied from the bot dashboard so it can sit in a same-origin frame (📈 tab).
+  if (BOT_URL && (p === '/monitor' || p.startsWith('/api/monitor/') || p.startsWith('/static/'))) {
+    const target = new URL(req.url, BOT_URL);
+    const up = http.request(target, { method: req.method, headers: { ...req.headers, host: target.host } }, (r) => {
+      res.writeHead(r.statusCode || 502, r.headers);
+      r.pipe(res);
+    });
+    up.on('error', () => { if (!res.headersSent) json(res, 502, { error: 'Dashboard ของบอทไม่ตอบ (' + BOT_URL + ')' }); });
+    req.pipe(up);
+    return;
   }
 
   const w = p.match(/^\/work\/([\w-]+)\/(.+)$/);

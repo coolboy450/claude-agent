@@ -13,10 +13,23 @@
 <body>
   <header class="top">
     <a class="logo" href="/">noob<span>_</span>dev <small>studio</small></a>
+    <nav class="tabs" role="tablist" aria-label="หน้า">
+      <button role="tab" id="tab-office" aria-selected="true" aria-controls="view-office">🏢 ออฟฟิศ</button>
+      <button role="tab" id="tab-bot" aria-selected="false" aria-controls="view-bot">📈 บอทหุ้น</button>
+    </nav>
     <div class="conn" id="conn" aria-live="polite">กำลังเชื่อมต่อ…</div>
   </header>
 
-  <main class="layout">
+  <section class="bot-view" id="view-bot" role="tabpanel" aria-labelledby="tab-bot" hidden>
+    <div class="bot-bar">
+      <span class="muted small">หน้า Monitor ของบอทหุ้น (PAPER) จาก Dashboard บนเซิร์ฟเวอร์</span>
+      <a class="link small" id="bot-open" target="_blank" rel="noopener">เปิดในแท็บใหม่ ↗</a>
+    </div>
+    <iframe id="bot-frame" title="Monitor บอทหุ้น" loading="lazy"></iframe>
+    <p class="bot-fail" id="bot-fail" hidden>โหลดหน้า Monitor ไม่ได้ — Dashboard ของบอท (พอร์ต 8000) ยังเปิดอยู่ไหม? ลอง <a class="link" id="bot-fail-open" target="_blank" rel="noopener">เปิดตรงๆ ↗</a></p>
+  </section>
+
+  <main class="layout" id="view-office" role="tabpanel" aria-labelledby="tab-office">
     <section class="office-wrap" aria-label="ออฟฟิศของทีม">
       <div class="office" id="office">
         <canvas id="canvas" width="320" height="200" aria-hidden="true"></canvas>
