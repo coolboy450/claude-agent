@@ -245,8 +245,8 @@
   }
 
   // ---------- tabs: office / stock-bot monitor ----------
-  // Monitor lives on the bot dashboard (port 8000) of the same host, unless the server says otherwise.
-  let monitorUrl = `${location.protocol}//${location.hostname}:8000/monitor`;
+  // The studio server proxies the bot dashboard's /monitor, so it loads same-origin (unless the server overrides).
+  let monitorUrl = '/monitor';
   function showTab(name) {
     const bot = name === 'bot';
     $('tab-office').setAttribute('aria-selected', !bot);
@@ -257,8 +257,11 @@
       $('bot-frame').dataset.src = monitorUrl;
       $('bot-frame').src = monitorUrl;
       $('bot-fail').hidden = true;
-      // a cross-origin frame gives no error event; just check the dashboard answers at all
-      fetch(monitorUrl, { mode: 'no-cors' }).catch(() => { $('bot-fail').hidden = false; });
+      // frames give no error event; check the dashboard answers at all
+      const sameOrigin = monitorUrl.startsWith('/');
+      fetch(monitorUrl, sameOrigin ? {} : { mode: 'no-cors' })
+        .then((r) => { if (sameOrigin && !r.ok) $('bot-fail').hidden = false; })
+        .catch(() => { $('bot-fail').hidden = false; });
     }
     $('bot-open').href = $('bot-fail-open').href = monitorUrl;
     try { localStorage.setItem('studio-tab', name); } catch {}
