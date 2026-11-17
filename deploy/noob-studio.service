@@ -9,6 +9,7 @@ WorkingDirectory=/home/noob/claude-agent/studio
 Environment=STUDIO_HOST=0.0.0.0
 Environment=STUDIO_PORT=4321
 Environment=STUDIO_PROJECTS_ROOT=/home/noob/projects
+EnvironmentFile=-/etc/studio/studio.env
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
