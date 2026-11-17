@@ -30,6 +30,7 @@ const LOW_TOKENS = 200000;            // below this, every agent drops to Sonnet
 const MAX_REVIEW_FIXES = 2;           // reviewer bounce-backs before it goes to the owner anyway
 
 const PERSONAS = require('./personas');
+const release = require('./release');
 const CHAT_MODEL = process.env.STUDIO_CHAT_MODEL || 'haiku'; // chat is small talk: cheapest model
 const BANTER_DEFAULT_MS = 3 * 60 * 1000; // team chats on its own every 3 min by default
 const MOODS = ['ปกติ', 'ดีใจ', 'ตื่นเต้น', 'งอน', 'น้อยใจ', 'เหนื่อย', 'หิว', 'ง่วง'];
@@ -538,6 +539,7 @@ async function stage(job, fn) {
       job.status = 'failed'; job.error = e.message;
     }
     log(job, 'studio', job.error);
+    release.notify(`${job.status === 'failed' ? '⚠️ งานติดขัด' : '⏸️ งานหยุดชั่วคราว'}: ${short(job.brief, 80)}\n${job.error}${release.studioLink()}`);
   } finally {
     busy = false; pushJob(job);
     for (const k of Object.keys(AGENTS)) if (agentStatus[k].state === 'working') setAgent(k, 'idle', '');
@@ -554,6 +556,7 @@ function runDrafts(job) {
     if (j && j.say) postChat(designerKey(job), 'owner', j.say);
     job.stage = 'choose'; job.status = 'waiting_choice';
     setAgent(designerKey(job), 'waiting', 'รอเจ้าของเลือกแบบ ✋');
+    release.notify(`✋ รอเลือกแบบร่าง: ${short(job.brief, 80)}${release.studioLink()}`);
   });
 }
 
@@ -591,8 +594,16 @@ function runBuildAndReview(job, fixNote) {
       if (round >= maxFixes) { log(job, 'studio', 'แก้ครบรอบแล้วยังไม่ผ่าน ส่งให้เจ้าของตัดสิน'); break; }
       note = job.review.issues.join('\n');
     }
+    job.preview = release.previewLink(job);
+    try { job.checks = job.kind === 'graphic' ? null : await release.checksFor(job); }
+    catch (e) { job.checks = { ok: false, blocking: [{ rule: 'checks', file: '', line: 0, msg: 'ตรวจความปลอดภัยไม่สำเร็จ: ' + e.message }], warnings: [], stats: {}, publishable: false }; }
     job.stage = 'approve'; job.status = 'waiting_approval';
     setAgent(reviewerKey(job), 'waiting', 'รอเจ้าของอนุมัติ ✋');
+    const ck = job.checks;
+    const ckLine = !ck ? '' : ck.ok ? `🛡️ ตรวจความปลอดภัยผ่าน (เตือน ${ck.warnings.length})` : `🛑 ตรวจความปลอดภัยไม่ผ่าน ${ck.blocking.length} ข้อ`;
+    const link = job.preview ? (job.preview.url || ('ดูผลงานในสตูดิโอ ' + job.preview.path)) : '';
+    postChat(reviewerKey(job), 'owner', `ส่งงานให้ตรวจแล้วนะ ${ckLine}${link ? ' ดูได้ที่ ' + link : ''}`.trim());
+    release.notify(`✋ รออนุมัติ: ${short(job.brief, 80)}\n${ckLine}${job.preview && job.preview.url ? '\n' + job.preview.url : ''}${release.studioLink()}`);
   });
 }
 
@@ -691,8 +702,11 @@ const server = http.createServer(async (req, res) => {
       if (job.status !== 'waiting_approval') return json(res, 400, { error: 'ยังไม่ถึงขั้นอนุมัติ' });
       setAgent(reviewerKey(job), 'idle', '');
       if (b.approved) {
-        job.status = 'done'; job.stage = 'done'; log(job, 'owner', 'อนุมัติแล้ว 🎉'); pushJob(job);
+        const canPublish = job.kind !== 'graphic' && !!release.targetFor(job);
+        log(job, 'owner', 'อนุมัติแล้ว 🎉');
         postChat('owner', 'all', 'อนุมัติแล้ว เก่งมากทุกคน 🎉');
+        if (canPublish) { job.status = 'approved'; job.stage = 'publish'; pushJob(job); }
+        else { job.status = 'done'; job.stage = 'done'; pushJob(job); }
         for (const k of Object.keys(AGENTS)) setAgent(k, 'idle', '🎉');
       } else {
         const note = String(b.note || '').trim() || 'เจ้าของยังไม่พอใจ ลองปรับให้ดีขึ้น';
@@ -734,6 +748,54 @@ const server = http.createServer(async (req, res) => {
     if (b.resetUsage) state.usage = { windowStart: Date.now(), used: 0 };
     save(); broadcast({ type: 'quota', quota: quota() });
     return json(res, 200, { quota: quota() });
+  }
+
+  // Real result of a web job, served from the project folder (read-only, dot-files / env / db are never served)
+  const pv = p.match(/^\/preview\/([\w-]+)(\/.*)?$/);
+  if (pv) {
+    const job = findJob(pv[1]);
+    if (!job || (job.kind !== 'web' && job.kind !== 'team')) { res.writeHead(404); return res.end('not found'); }
+    if (!pv[2]) { res.writeHead(302, { Location: p + '/' }); return res.end(); }
+    if (!release.servePreview(res, job, pv[2])) { res.writeHead(404); res.end('not found'); }
+    return;
+  }
+
+  const rk = p.match(/^\/api\/jobs\/([\w-]+)\/(checks|publish|finish)$/);
+  if (rk && req.method === 'POST') {
+    const job = findJob(rk[1]); if (!job) return json(res, 404, { error: 'ไม่พบงาน' });
+    if (rk[2] === 'checks') {
+      if (busy || job.checking) return json(res, 409, { error: 'กำลังทำงานอยู่' });
+      job.checking = true;
+      try { job.checks = await release.checksFor(job); pushJob(job); } finally { job.checking = false; }
+      return json(res, 200, { job: publicJob(job) });
+    }
+    if (job.status !== 'approved') return json(res, 400, { error: 'ต้องอนุมัติงานก่อน' });
+    if (rk[2] === 'finish') {
+      job.status = 'done'; job.stage = 'done'; log(job, 'owner', 'จบงานโดยไม่เผยแพร่'); pushJob(job);
+      return json(res, 200, { job: publicJob(job) });
+    }
+    if (job.publishing) return json(res, 409, { error: 'กำลังเผยแพร่อยู่' });
+    job.publishing = true; job.publishError = null;
+    try {
+      const ck = await release.checksFor(job); job.checks = ck;
+      if (!ck.ok) { pushJob(job); return json(res, 400, { error: 'ตรวจความปลอดภัยยังไม่ผ่าน เผยแพร่ไม่ได้ (' + ck.blocking.length + ' ข้อ)', job: publicJob(job) }); }
+      log(job, 'studio', 'กำลังเผยแพร่…'); pushJob(job);
+      const r = await release.publish(job, job.brief);
+      if (r.ok) {
+        job.published = { at: Date.now(), url: r.url || null, branch: r.branch || null, compare: r.compare || null, commit: r.commit || null, changed: r.changed !== false, message: r.message || null };
+        job.status = 'done'; job.stage = 'done';
+        const what = r.changed === false ? 'ไม่มีอะไรเปลี่ยน (ของบน GitHub เหมือนเดิมอยู่แล้ว)' : (r.url || r.compare || r.branch || 'เรียบร้อย');
+        log(job, 'studio', 'เผยแพร่แล้ว: ' + what);
+        postChat('studio', 'owner', 'เผยแพร่แล้ว 🚀 ' + what);
+        release.notify(`🚀 เผยแพร่แล้ว: ${short(job.brief, 80)}\n${what}`);
+      } else {
+        job.publishError = (r.stage ? '[' + r.stage + '] ' : '') + (r.message || 'เผยแพร่ไม่สำเร็จ');
+        log(job, 'studio', 'เผยแพร่ไม่สำเร็จ: ' + job.publishError);
+        release.notify(`⚠️ เผยแพร่ไม่สำเร็จ: ${short(job.brief, 80)}\n${job.publishError}${release.studioLink()}`);
+      }
+      pushJob(job);
+      return json(res, 200, { job: publicJob(job), result: r });
+    } finally { job.publishing = false; }
   }
 
   // Stock-bot monitor, proxied from the bot dashboard so it can sit in a same-origin frame (📈 tab).

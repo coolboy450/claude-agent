@@ -1,0 +1,6 @@
+#!/bin/sh
+# Root-owned entry point for publishing. Called by the studio through `sudo -n`.
+# Runs with a clean environment so nothing from the studio's environment (config path, NODE_OPTIONS, ...) leaks in.
+exec /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/root LANG=C.UTF-8 \
+  STUDIO_PUBLISH_CONFIG=/etc/studio/publish.json \
+  /usr/bin/node /usr/local/lib/studio-publish/publish.js "$@"

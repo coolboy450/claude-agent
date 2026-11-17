@@ -53,6 +53,8 @@ ufw allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null
 ufw --force default deny incoming >/dev/null
 ufw --force enable >/dev/null
 
+bash "/home/$APP_USER/claude-agent/deploy/setup-publish.sh"
+
 echo "==> service"
 install -m 644 "/home/$APP_USER/claude-agent/deploy/noob-studio.service" /etc/systemd/system/noob-studio.service
 systemctl daemon-reload
@@ -67,4 +69,7 @@ Done. Still needed (once):
   1) tailscale up                         # log in to your Tailscale account
   2) sudo -u $APP_USER -H claude auth login  # log in to Claude (choose your subscription)
 Then open  http://<tailscale-ip>:$PORT  from a device on your tailnet.
+
+Publish button: add the deploy keys printed above on GitHub, then (optional) run
+  sudo bash /home/$APP_USER/claude-agent/deploy/set-studio-webhook.sh   # Discord notifications
 EOF

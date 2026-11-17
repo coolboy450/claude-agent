@@ -4,9 +4,9 @@
   const NAMES = { ui: 'นักออกแบบ UI', graphic: 'นักออกแบบกราฟิก', frontend: 'นักพัฒนา Frontend', reviewer: 'ผู้ตรวจคุณภาพ', owner: 'คุณ', studio: 'สตูดิโอ' };
   const STATUS = {
     running: 'ทีมกำลังทำงาน…', waiting_choice: 'รอคุณเลือกแบบร่าง', waiting_approval: 'รอคุณอนุมัติ',
-    done: 'เสร็จแล้ว 🎉', failed: 'เกิดข้อผิดพลาด', paused_limit: 'หยุดชั่วคราว: โควตาหมด', cancelled: 'ยกเลิกแล้ว',
+    approved: 'อนุมัติแล้ว รอเผยแพร่', done: 'เสร็จแล้ว 🎉', failed: 'เกิดข้อผิดพลาด', paused_limit: 'หยุดชั่วคราว: โควตาหมด', cancelled: 'ยกเลิกแล้ว',
   };
-  const STAGES = ['draft', 'choose', 'build', 'review', 'approve'];
+  const STAGES = ['draft', 'choose', 'build', 'review', 'approve', 'publish'];
   let job = null, picked = null;
 
   async function api(path, body) {
@@ -102,9 +102,17 @@
         box.append(b);
       });
     }
+    renderChecks(job);
+    renderPublish(job);
     // approve
     const approving = job.status === 'waiting_approval';
     $('approve').hidden = !approving;
+    const pv = approving && job.preview;
+    $('preview-box').hidden = !pv;
+    if (pv) {
+      if ($('preview-frame').dataset.src !== pv.path) { $('preview-frame').src = pv.path; $('preview-frame').dataset.src = pv.path; }
+      $('preview-open').href = pv.path;
+    }
     if (approving) {
       const rv = job.review || {};
       $('review-verdict').textContent = rv.verdict === 'pass' ? 'ผู้ตรวจ: ผ่าน ✅' : 'ผู้ตรวจ: ยังไม่ผ่าน ⚠️ (แก้ครบรอบแล้ว ให้คุณตัดสิน)';
@@ -121,6 +129,42 @@
       });
     }
   }
+  // ---------- safety checks + publish ----------
+  function renderChecks(j) {
+    const c = j.checks;
+    const box = $('checks-box');
+    box.hidden = !(c && j.status === 'waiting_approval');
+    if (box.hidden) return;
+    $('checks-sum').textContent = c.ok ? '🛡️ ตรวจความปลอดภัย: ผ่าน' : `🛑 ตรวจความปลอดภัย: ไม่ผ่าน ${c.blocking.length} ข้อ (เผยแพร่ไม่ได้จนกว่าจะแก้)`;
+    $('checks-sum').className = 'verdict ' + (c.ok ? 'pass' : 'fail');
+    const fill = (ul, arr) => { ul.innerHTML = ''; arr.forEach((f) => { const li = document.createElement('li'); li.textContent = (f.file ? f.file + (f.line ? ':' + f.line : '') + ' — ' : '') + f.msg; ul.append(li); }); };
+    fill($('checks-block'), c.blocking || []);
+    fill($('checks-warn'), c.warnings || []);
+    $('checks-warn-wrap').hidden = !(c.warnings || []).length;
+    $('checks-warn-sum').textContent = `คำเตือน ${(c.warnings || []).length} ข้อ (ไม่บล็อก)`;
+  }
+  function renderPublish(j) {
+    const on = j.status === 'approved';
+    $('publish').hidden = !on;
+    if (!on) return;
+    const c = j.checks || {};
+    $('publish-info').textContent = c.publishable
+      ? (c.mode === 'branch' ? `จะส่งการแก้ไขขึ้นเป็นสาขา studio/${j.id} บน GitHub ให้คุณตรวจแล้วค่อยรวมเอง (โปรเจกต์: ${c.target})` : `จะอัปเดตเว็บจริง (โปรเจกต์: ${c.target}) — ตรวจความปลอดภัยอีกรอบก่อนส่งทุกครั้ง`)
+      : 'โปรเจกต์นี้ยังไม่ได้ตั้งค่าให้เผยแพร่';
+    $('publish-error').textContent = j.publishError || '';
+    $('publish-block').innerHTML = '';
+    (c.blocking || []).forEach((f) => { const li = document.createElement('li'); li.textContent = (f.file ? f.file + ' — ' : '') + f.msg; $('publish-block').append(li); });
+    $('publish-go').disabled = !c.publishable || !c.ok || !!j.publishing;
+  }
+  $('checks-rerun').onclick = async () => { $('checks-rerun').disabled = true; try { setJob((await api(`/api/jobs/${job.id}/checks`, {})).job); } catch (e) { alert(e.message); } finally { $('checks-rerun').disabled = false; } };
+  $('publish-go').onclick = async () => {
+    if (!confirm('เผยแพร่ตอนนี้? ของจริงบน GitHub จะถูกอัปเดต')) return;
+    $('publish-go').disabled = true; $('publish-error').textContent = '';
+    try { setJob((await api(`/api/jobs/${job.id}/publish`, {})).job); }
+    catch (e) { $('publish-error').textContent = e.message; renderPublish(job); }
+  };
+  $('publish-skip').onclick = async () => { try { setJob((await api(`/api/jobs/${job.id}/finish`, {})).job); } catch (e) { alert(e.message); } };
+
   function renderStepper() {
     const cur = job ? job.stage : null;
     const idx = STAGES.indexOf(cur);
@@ -168,6 +212,13 @@
     sel.value = cur && sel.querySelector(`option[value="${cur}"]`) ? cur : 'all';
   }
   const pname = (k) => k === 'owner' ? 'คุณ' : k === 'all' ? 'ทุกคน' : (personas[k] ? personas[k].name : k);
+  // text with clickable http(s) links, built with DOM nodes (never innerHTML)
+  function linkify(el, text) {
+    String(text).split(/(https?:\/\/[^\s<>"']+)/g).forEach((part, i) => {
+      if (i % 2) { const a = document.createElement('a'); a.href = part; a.textContent = part; a.target = '_blank'; a.rel = 'noopener noreferrer'; el.append(a); }
+      else if (part) el.append(document.createTextNode(part));
+    });
+  }
   function addChat(m, animate) {
     const li = document.createElement('li');
     const p = personas[m.who];
@@ -178,7 +229,7 @@
     const who = document.createElement('div'); who.className = 'who';
     const b = document.createElement('b'); b.textContent = pname(m.who);
     who.append(b, document.createTextNode(m.to && m.to !== 'all' && m.to !== 'owner' ? ` → ${pname(m.to)}` : m.who === 'owner' && m.to === 'all' ? ' → ทุกคน' : ''));
-    const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = m.text;
+    const txt = document.createElement('div'); txt.className = 'txt'; linkify(txt, m.text);
     body.append(who, txt); li.append(av, body);
     const box = $('chat');
     const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;

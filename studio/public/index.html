@@ -42,6 +42,7 @@
         <li data-s="build">ลงมือ</li>
         <li data-s="review">ตรวจ</li>
         <li data-s="approve">✋ อนุมัติ</li>
+        <li data-s="publish">🚀 เผยแพร่</li>
       </ol>
       <section class="card chat-card" aria-labelledby="chat-title">
         <div class="row-between">
@@ -148,10 +149,30 @@
           <button class="btn btn-primary" id="choose-btn" disabled>ใช้แบบนี้</button>
         </div>
 
+        <div id="publish" hidden class="stack">
+          <h3>🚀 เผยแพร่</h3>
+          <p id="publish-info" class="small"></p>
+          <p id="publish-error" class="verdict fail" role="alert"></p>
+          <ul id="publish-block" class="issues"></ul>
+          <div class="row">
+            <button class="btn btn-primary" id="publish-go" type="button">เผยแพร่เลย</button>
+            <button class="btn btn-ghost" id="publish-skip" type="button">จบงานโดยไม่เผยแพร่</button>
+          </div>
+        </div>
         <div id="approve" hidden class="stack">
           <h3>✋ ตรวจผลลัพธ์สุดท้าย</h3>
           <p id="review-verdict" class="verdict"></p>
           <ul id="review-issues" class="issues"></ul>
+          <div id="preview-box" class="stack" hidden>
+            <p class="small"><strong>ผลงานจริง</strong> · <a id="preview-open" href="#" target="_blank" rel="noopener">เปิดในแท็บใหม่ ↗</a></p>
+            <div class="preview"><iframe id="preview-frame" title="ผลงานจริง" sandbox="allow-scripts allow-popups" loading="lazy"></iframe></div>
+          </div>
+          <div id="checks-box" class="stack" hidden>
+            <p id="checks-sum" class="verdict"></p>
+            <ul id="checks-block" class="issues"></ul>
+            <details id="checks-warn-wrap"><summary id="checks-warn-sum"></summary><ul id="checks-warn" class="issues"></ul></details>
+            <div><button class="btn btn-ghost" id="checks-rerun" type="button">ตรวจอีกครั้ง</button></div>
+          </div>
           <div class="gallery" id="gallery"></div>
           <details><summary>สรุปจากผู้ทำงาน</summary><pre id="maker-summary"></pre></details>
           <label for="approve-note" class="small">ถ้าจะขอแก้ บอกสิ่งที่อยากเปลี่ยน</label>
