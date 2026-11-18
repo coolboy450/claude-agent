@@ -40,9 +40,10 @@ if [ ! -f "$ETC/publish.json" ]; then
     const cfg = {
       workdir: "/var/lib/studio-publish",
       author: { name: "noob_dev Studio", email: "coolboy450@users.noreply.github.com" },
-      checks: { allowedEmails: list(e.OWNER_EMAILS), allowedDomains: [], forbidden: [...list(e.SERVER_IPS), ":4321", ":8000"] },
+      checks: { allowedEmails: list(e.OWNER_EMAILS), allowedDomains: [], forbidden: list(e.SERVER_IPS) },
       projects: {
-        "noob-main-site": { dir: "/home/noob/projects/noob-main-site", repo: "git@github.com:coolboy450/coolboy450.github.io.git", key: e.ETC + "/keys/noob-main-site", branch: "main", mode: "pages", url: "https://coolboy450.github.io/", owner: "noob" },
+        "noob-main-site": { dir: "/home/noob/projects/noob-main-site", repo: "git@github.com:coolboy450/coolboy450.github.io.git", key: e.ETC + "/keys/noob-main-site", branch: "main", mode: "pages", url: "https://coolboy450.github.io/", owner: "noob",
+          forbidden: [":4321", ":8000"] },  // port numbers only matter on public sites; code docs may mention localhost:8000
         "stock-trading-bot": { dir: "/home/noob/projects/stock-trading-bot", repo: "git@github.com:coolboy450/stock-trading-bot.git", key: e.ETC + "/keys/stock-trading-bot", branch: "main", mode: "branch", owner: "noob" }
       }
     };
