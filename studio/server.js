@@ -194,6 +194,20 @@ function describeTool(c) {
   return `${verb} ${base || short(i.command, 40) || ''}`.trim();
 }
 
+// Environment for every agent / chat run. Secrets are set to "" on purpose: projects load their own
+// .env with python-dotenv (override=False), which never replaces a variable that already exists, so an
+// empty value here stops tests or scripts an agent runs from posting to the real Discord, Telegram, LINE
+// or a broker. The studio's own webhook is removed too (agents must not see it).
+const AGENT_BLANK = ['DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'LINE_CHANNEL_ACCESS_TOKEN', 'LINE_TO',
+  'ALPACA_API_KEY', 'ALPACA_SECRET_KEY', 'ALPACA_API_SECRET', 'APCA_API_KEY_ID', 'APCA_API_SECRET_KEY',
+  'SETTRADE_APP_ID', 'SETTRADE_APP_SECRET', 'SETTRADE_BROKER_ID', 'SETTRADE_APP_CODE', 'SETTRADE_PIN', 'ALPHA_VANTAGE_API_KEY'];
+function agentEnv() {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (/^STUDIO_(DISCORD|PUBLISH)/.test(k)) delete env[k];
+  for (const k of AGENT_BLANK) env[k] = '';
+  return env;
+}
+
 function runAgent(job, key, prompt, modelOverride) {
   return new Promise((resolve, reject) => {
     const model = modelOverride && !quota().low ? modelOverride : modelFor(key);
@@ -208,7 +222,7 @@ function runAgent(job, key, prompt, modelOverride) {
     setAgent(key, 'working', `เริ่มงาน (${model})`);
     log(job, key, `เริ่มทำงานด้วยโมเดล ${model}`);
 
-    const child = spawn(CLAUDE.cmd, args, { cwd: job.projectPath, shell: CLAUDE.shell, windowsHide: true, env: process.env });
+    const child = spawn(CLAUDE.cmd, args, { cwd: job.projectPath, shell: CLAUDE.shell, windowsHide: true, env: agentEnv() });
     job.pid = child.pid;
     let buf = '', result = null, lastText = '', stderr = '';
 
@@ -273,7 +287,7 @@ function runQuick(prompt) {
     const args = ['-p', '--model', modelFor('chat'), '--output-format', 'json',
       '--system-prompt', 'You write short in-character team chat lines for a pixel-office app. Reply with JSON only.',
       '--tools', '', '--strict-mcp-config', '--disable-slash-commands'];
-    const child = spawn(CLAUDE.cmd, args, { cwd: DATA_DIR, shell: CLAUDE.shell, windowsHide: true, env: process.env });
+    const child = spawn(CLAUDE.cmd, args, { cwd: DATA_DIR, shell: CLAUDE.shell, windowsHide: true, env: agentEnv() });
     let out = '', err = '';
     child.stdout.on('data', (d) => { out += d.toString('utf8'); });
     child.stderr.on('data', (d) => { err += d.toString('utf8'); });
@@ -824,7 +838,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  const v = spawnSync(CLAUDE.cmd, ['--version'], { shell: CLAUDE.shell, encoding: 'utf8' });
+  const v = spawnSync(CLAUDE.cmd, ['--version'], { shell: CLAUDE.shell, encoding: 'utf8', env: agentEnv() });
   console.log(`\n  noob_dev Studio → http://localhost:${PORT}`);
   console.log(`  Claude CLI: ${v.status === 0 ? v.stdout.trim() : 'ไม่พบ! ติดตั้ง: npm install -g @anthropic-ai/claude-code'}`);
   console.log(`  โปรเจกต์จาก: ${PROJECTS_ROOT}\n`);
