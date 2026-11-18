@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { runChecks } = require('./checks');
 
 const CONFIG_PATH = process.env.STUDIO_PUBLISH_CONFIG || '/etc/studio/publish.json';
@@ -65,12 +65,32 @@ async function checksFor(job) {
   const t = targetFor(job);
   const mode = t ? t.mode : (job.kind === 'code' ? 'branch' : 'pages');
   const c = cfg.checks || {};
+  const p = t || {};
+  // same lists as the root publisher: global + per-project
+  const merged = (k) => [...(c[k] || []), ...(p[k] || [])];
+  // branch mode publishes only what git sees as changed, so only those files are checked (like studio-publish)
+  let files;
+  if (mode === 'branch') {
+    try { files = changedFiles(job.projectPath); }
+    catch (e) { return { ok: false, blocking: [{ rule: 'git', severity: 'block', file: '', line: 0, msg: e.message }], warnings: [], stats: {}, mode, target: t ? t.name : null, publishable: !!t, at: Date.now() }; }
+  }
   const r = await runChecks({
-    dir: job.projectPath, mode,
-    allowedEmails: c.allowedEmails, allowedDomains: c.allowedDomains, forbidden: c.forbidden,
+    dir: job.projectPath, mode, files,
+    allowedEmails: merged('allowedEmails'), allowedDomains: merged('allowedDomains'), forbidden: merged('forbidden'),
     runTests: mode === 'branch',
   });
   return { ...r, mode, target: t ? t.name : null, publishable: !!t, at: Date.now() };
+}
+
+/** Files git sees as modified or new (ignored files such as .env and databases are never included). */
+function changedFiles(dir) {
+  const ls = (extra) => {
+    const r = spawnSync('git', ['-C', dir, 'ls-files', ...extra, '-z'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (r.status !== 0) throw new Error('git ls-files failed: ' + String(r.stderr || '').trim().slice(0, 200));
+    return r.stdout.split('\0').filter(Boolean);
+  };
+  const deleted = new Set(ls(['-d']));
+  return [...new Set(ls(['-m', '-o', '--exclude-standard']))].filter((f) => !deleted.has(f) && !/^(\.noob-studio|data|logs)\//.test(f));
 }
 
 // ---------- Discord ----------
